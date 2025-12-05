@@ -7,7 +7,9 @@ In Lecture 07 we saw how attention mechanisms solve the information bottleneck i
 ## The Limitations of Recurrent Models
 
 Recall from Lecture 06 that RNNs process sequences sequentially:
-$$\mathbf{h}_t = f(\mathbf{h}_{t-1}, \mathbf{x}_t)$$
+\[
+\mathbf{h}_t = f(\mathbf{h}_{t-1}, \mathbf{x}_t)
+\]
 
 **Key limitations:**
 1. **Sequential dependency:** Cannot parallelize over time steps
