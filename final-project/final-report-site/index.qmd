@@ -1,11 +1,11 @@
 ---
-title: "Gemma Fine Tuning with LoRa Adapters"
-subtitle: "Placeholder"
+title: "Using LoRA to Fine Tune Gemma Models for Text to SQL"
+subtitle: "DSAN 5800 Final Project Report"
 authors:
   - name: CJ Jones
     email: cmj147@georgetown.edu
     affiliation: Georgetown University
-  - name: Adam Stein
+  - name: 
     email: 
     affiliation: Georgetown University
 format:
@@ -33,25 +33,48 @@ execute:
 
 ## Abstract
 
+Large language models (LLMs) have demonstrated strong capabilities in natural language understanding and code generation, yet translating free-form questions into executable SQL queries remains a persistent challenge, particularly when training data is limited or domain-specific. This project investigates whether low-rank adaptation (LoRA) can effectively adapt Google’s pretrained Gemma-3 model for the text-to-SQL task using a large, synthetically generated dataset and evaluates its performance on the standardized WikiSQL benchmark. A fine-tuning pipeline is constructed using QLoRA-style 4-bit quantization, LoRA modules inserted into the attention and feed-forward projections of the transformer stack, and supervised fine-tuning on 50,000 synthetic question–schema–query pairs. The evaluation strategy measures execution accuracy, lexical similarity, and structural SQL correctness on unseen WikiSQL tables. [PLACEHOLDER FOR BRIEF DESCRIPTION OF RESULTS HERE]
+
 ## Introduction
+
+Recent advancements in transformer-based language models have significantly improved the ability of LLMs to solve structured translation tasks such as text-to-SQL generation. By conditioning on database schemas and natural language questions, these models attempt to produce syntactically valid and semantically accurate SQL queries that retrieve the correct result when executed. Although instruction-tuned models exhibit promising performance out of the box, domain adaptation remains necessary when models must operate over idiosyncratic schemas or question styles. Fine-tuning full LLMs, however, is computationally expensive and often infeasible for academic or resource-constrained environments.
+
+Low-rank adaptation (LoRA) offers an appealing alternative by introducing small trainable matrices into selected projection layers while freezing the underlying LLM. This approach dramatically reduces memory consumption and training cost, enabling experimentation on mid-range GPU hardware. The present work applies LoRA to Google’s 4-billion-parameter Gemma-3 model with the objective of learning SQL generation behavior from a synthetic corpus and evaluating the resulting model on the well-studied WikiSQL benchmark. The study focuses on understanding whether synthetic pretraining can induce transferable SQL-reasoning behavior, and how the placement and rank of LoRA adapters influence downstream performance.
 
 ## Literature Review
 
+The foundational ideas underlying this project draw from several strands of research in parameter-efficient LLM fine-tuning, synthetic data generation, and text-to-SQL modeling. The LoRA framework introduced by Hu et al. (2021) demonstrated that weight updates in large transformer models are often low-rank and may be approximated by decomposing the update as
+\[
+\Delta W = B A
+\]
+where \(A \in \mathbb{R}^{r \times d}\) and \(B \in \mathbb{R}^{d \times r}\) are learned matrices and \(r \ll d\). This insight enabled fine-tuning large models with a fraction of the full parameter count, a technique later adopted in QLoRA, which combines low-rank adaptation with 4-bit quantization to further reduce memory footprint.
+
+Parallel work in text-to-SQL research, including the WikiSQL dataset and the Seq2SQL, SQLova, and RAT-SQL architectures, has emphasized schema grounding, attention over column names, and structured decoding. While these models rely on explicit SQL grammars or pointer networks, contemporary LLM-based approaches increasingly treat SQL generation as a pure sequence-to-sequence learning problem, often complemented by schema serialization. Synthetic data generation, especially through prompt-based large-scale generation pipelines as used in the dataset employed here, has further shown that high-coverage training corpora can improve generalization in structured prediction tasks.
+
+Collectively, this literature motivates the central hypothesis of this project: a pretrained LLM, equipped with LoRA adapters and trained solely on synthetic SQL data, may acquire useful structural competence that transfers to real-world datasets such as WikiSQL.
+
 ## Dataset
+
+Two datasets are used in this project, each serving a distinct purpose in the training and evaluation pipeline. The primary training corpus is a 50,000-example subset of the Gretel Synthetic Text-to-SQL dataset. Each entry contains a natural language question, a database schema expressed as a list of column names, and a corresponding SQL query. Because this dataset is generated synthetically, it provides large coverage of query patterns, including simple selections, aggregations, and multi-condition filters. To ensure compatibility with the evaluation framework, each schema is normalized into a WikiSQL-style textual representation in which columns are formatted as “- column (TEXT)”. A one-shot prompt is then constructed that concatenates the schema, user question, and the instruction “SQL Query:” to form the supervised fine-tuning input. The model is trained to generate only the SQL continuation that follows this prompt.
+
+The second dataset, WikiSQL, is reserved exclusively for evaluation. WikiSQL consists of natural language questions over real Wikipedia tables, each paired with an executable SQL query expressed in a limited grammar involving a single SELECT expression and a conjunctive WHERE clause. Each table includes both a header row and free-form cell entries. During evaluation, each table is instantiated as an in-memory SQLite database, allowing both gold SQL and model-generated SQL to be executed and compared for exact result-set match. This strict evaluation criterion enables a more realistic assessment of whether the generated queries are semantically correct.
+
+[PLACE EXAMPLES OF THE TWO DATASETS HERE]
+[ADD TABLES SHOWING STATS LIKE SIZE AND LENGTH OF DATASET]
 
 ::: {.columns}
 ::: {.column width="50%"}
 <figure>
-  <img src="./resources/Chess-Board-with-Boxes.png" width="80%" class="shadow padded">
-  <figcaption>Fig. 1: Annotated chess board output from ChessReD Dataset</figcaption>
+  <img src="./" width="80%" class="shadow padded">
+  <figcaption>Fig. 1: </figcaption>
 </figure>
   
 :::
 
 ::: {.column width="50%"}
 <figure>
-  <img src="./resources/Chess-Board-without-Boxes.jpg" width="80%" class="shadow padded">
-  <figcaption>Fig. 2: Chess board with no bounding boxes output from ChessReD Dataset</figcaption>
+  <img src="./" width="80%" class="shadow padded">
+  <figcaption>Fig. 2: </figcaption>
 </figure>
 
 :::
@@ -59,75 +82,90 @@ execute:
 
 ## Methods
 
-### Convolutional Feature Extractor
+### Gemma Pretrained LLM
+
+The Gemma-3 4B pretrained model serves as the backbone for all experiments. This model consists of 34 transformer layers with a hidden size of 2,560 and 8 attention heads, using a vocabulary of 262k tokens. The text encoder implements sliding-window attention for the majority of layers, interleaved with full-attention blocks to maintain global coherence. All parameters of the pretrained model remain frozen during LoRA fine-tuning, ensuring that only the injected adapter matrices receive gradient updates. The model is loaded in 4-bit NF4 quantization using bitsandbytes, which significantly reduces memory required for inference and facilitates parameter-efficient training on consumer GPUs.
 
 <figure style="text-align: center;">
-  <img src="./resources/Model_Achitecture_Image.png"
+  <img src="./"
        width="60%"
        style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 3: End-to-end architecture for combined chessboard recognition network</figcaption>
+  <figcaption>Fig. 3:</figcaption>
 </figure>
 
-### Training Procedure
+### Low Rank Adapters
+
+LoRA adaptation modifies specific linear projections inside the transformer. For a given weight matrix \( W_0 \in \mathbb{R}^{d \times k} \) in the pretrained model, LoRA replaces the effective weight during training by
+
+\[
+W = W_0 + \Delta W, \qquad \Delta W = B A,
+\]
+
+where \( A \in \mathbb{R}^{r \times k} \) and \( B \in \mathbb{R}^{d \times r} \) are the LoRA parameters and \( r \ll d \). Because \( W_0 \) remains frozen, the optimization problem reduces to estimating a low-rank update that shifts the model’s behavior without modifying the underlying full-rank matrix. A scaling factor \( \alpha \) is applied to stabilize training:
+
+\[
+\Delta W = \frac{\alpha}{r} B A.
+\]
+
+In this project, LoRA adapters are attached to the following projection matrices across all transformer layers:
+
+- Query, Key, Value, and Output projections in self-attention.
+- Up, Down, and Gate projections in the feed-forward network.
+- The token embedding and language modeling head (saved modules) are also included for compatibility with PEFT.
+
+This configuration mirrors prior work in sequence generation tasks and ensures that both attention dynamics and feed-forward transformations can adapt to SQL-specific reasoning patterns.
 
 :::: {}
 
-| Component              | # Params           | Trainable @ Start? | Trainable @ End |
-|------------------------|--------------------|---------------------|-----------------|
-| ConvNeXt-B backbone    | 88 M               | ❌ frozen           | ✅ last 3 / 12   |
-| Transformer (4 layers) | 17 M               | ❌ frozen           | ✅ last 1 / 4    |
-| Square tokens          | 64 × 1024 ≈ 66 k   | ✅                  | ✅              |
-| Linear head            | 13 k               | ✅                  | ✅              |
-| **Total**              | **105 M**          | 79 k (0.07%)        | ~30 M (28.6%)   |
-
-Fig 4. Summary of model parameter counts, training visibility at start and end of training, and staged unfreezing schedule.
+Table 1.
 
 ::::
+
+### Training Plan
+
+Supervised fine-tuning is performed using TRL’s SFTTrainer with the concatenated prompt-plus-completion format. The training objective is standard next-token cross-entropy over the entire combined sequence, although in future work a completion-only loss will be explored to reduce exposure bias. A constant learning rate of \( 2 \times 10^{-4} \)
+ is used with gradient accumulation and gradient checkpointing to accommodate long sequences. Training proceeds for three epochs over the 50,000-example synthetic dataset, with metrics logged at each step, including loss, gradient norm, number of processed tokens, and mean token-level accuracy.
+
+### Text to SQL Experimental Setup
+
+The fine-tuned model is evaluated exclusively on WikiSQL, which the model never sees during training. For each evaluation example, the schema is serialized into the same textual form used for synthetic data, ensuring consistent prompt style. The generated SQL is extracted by locating the first SELECT statement in the model output and executing it inside a temporary SQLite instance. Metrics include execution accuracy (exact match of result sets), lexical similarity (Levenshtein and Jaccard scores), and structural similarity of SELECT columns, WHERE columns, and operators. Experimental variations will include LoRA rank sweeps, ablation of target modules, and prompt-format experiments.
 
 \
 
 ## Results
 
-### Error Distribution and Exact-Match Accuracy
+### Training Results
+
+### Text to SQL Evaluation Results
 
 
 :::: {}
-| Metric                         | Baseline ResNeXt (2023) | **ConvNeXt-TE (+Tx)** (Ours) |
-|-------------------------------|--------------------------|------------------------------|
-| Mean incorrect squares / board| **3.40**                 | **4.33**                     |
-| Boards with no mistakes (%)   | **15.26**                | **9.12**                     |
-| Boards with ≤1 mistake (%)    | **25.92**                | **19.38**                    |
-| Per-square error rate (%)     | **5.31**                 | **5.94**                     |
+
 
 ::::
 
 \
 
 <figure style="text-align: center;">
-  <img src="./resources/Version_6_Board_Error_Distribution.png"
+  <img src="./"
        width="60%"
        style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 5: Distribution of incorrect squares per predicted board. The model most frequently makes 2–4 errors per board, though outlier examples with 10+ mistakes persist.</figcaption>
+  <figcaption>Fig. 4:</figcaption>
 </figure>
 
-### 6.2 Confusions
-
-### 6.3 Qualitative
-
 <figure style="text-align: center;">
-  <img src="./resources/Version_6_Near_Perfect_Predict.png"
+  <img src="./"
        width="95%"
        style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 7: Example of model prediction on a validation board. From left to right: original image, ground-truth board matrix, model-predicted matrix. The predicted board achieves a per-square accuracy of 0.984.</figcaption>
+  <figcaption>Fig. 7:</figcaption>
 </figure>
 
-### 6.4 Training Dynamics
 
 <figure style="text-align: center;">
-  <img src="./resources/loss_plot.png"
+  <img src="./"
        width="70%"
        style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 8: Training and validation loss curves across all epochs. Smooth convergence reflects the stability of the training setup and the effectiveness of progressive unfreezing.</figcaption>
+  <figcaption>Fig. 8:</figcaption>
 </figure>
 
 ---
