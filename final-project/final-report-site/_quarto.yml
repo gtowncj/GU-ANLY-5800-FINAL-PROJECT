@@ -2,7 +2,7 @@ project:
   type: website
 
 website:
-  title: "Tunix Gemma Reinforcement Learning"
+  title: "Fine Tuning Gemma with LoRA "
   search: false
   navbar:
     left:
