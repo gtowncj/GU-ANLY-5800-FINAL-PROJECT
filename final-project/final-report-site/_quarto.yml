@@ -1,0 +1,20 @@
+project:
+  type: website
+
+website:
+  title: "Tunix Gemma Reinforcement Learning"
+  search: false
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    toc: true
+
+
+

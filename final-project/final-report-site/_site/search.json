@@ -1,0 +1,51 @@
+[
+  {
+    "objectID": "index.html#introduction",
+    "href": "index.html#introduction",
+    "title": "Tunix Gemma Reinforcement Learning",
+    "section": "2 Introduction",
+    "text": "2 Introduction"
+  },
+  {
+    "objectID": "index.html#literature-review",
+    "href": "index.html#literature-review",
+    "title": "Tunix Gemma Reinforcement Learning",
+    "section": "3 Literature Review",
+    "text": "3 Literature Review"
+  },
+  {
+    "objectID": "index.html#dataset",
+    "href": "index.html#dataset",
+    "title": "Tunix Gemma Reinforcement Learning",
+    "section": "4 Dataset",
+    "text": "4 Dataset\n\n\n\n\n\nFig. 1: Annotated chess board output from ChessReD Dataset\n\n\n\n\n\n\nFig. 2: Chess board with no bounding boxes output from ChessReD Dataset"
+  },
+  {
+    "objectID": "index.html#methods",
+    "href": "index.html#methods",
+    "title": "Tunix Gemma Reinforcement Learning",
+    "section": "5 Methods",
+    "text": "5 Methods\n\n5.1 Convolutional Feature Extractor\n\n\n\nFig. 3: End-to-end architecture for combined chessboard recognition network\n\n\n\n\n5.2 Training Procedure\n\n\n\n\n\n\n\n\n\n\nComponent\n# Params\nTrainable @ Start?\nTrainable @ End\n\n\n\n\nConvNeXt-B backbone\n88 M\n❌ frozen\n✅ last 3 / 12\n\n\nTransformer (4 layers)\n17 M\n❌ frozen\n✅ last 1 / 4\n\n\nSquare tokens\n64 × 1024 ≈ 66 k\n✅\n✅\n\n\nLinear head\n13 k\n✅\n✅\n\n\nTotal\n105 M\n79 k (0.07%)\n~30 M (28.6%)\n\n\n\nFig 4. Summary of model parameter counts, training visibility at start and end of training, and staged unfreezing schedule."
+  },
+  {
+    "objectID": "index.html#results",
+    "href": "index.html#results",
+    "title": "Tunix Gemma Reinforcement Learning",
+    "section": "6 Results",
+    "text": "6 Results\n\n6.1 Error Distribution and Exact-Match Accuracy\n\n\n\n\n\n\n\n\n\nMetric\nBaseline ResNeXt (2023)\nConvNeXt-TE (+Tx) (Ours)\n\n\n\n\nMean incorrect squares / board\n3.40\n4.33\n\n\nBoards with no mistakes (%)\n15.26\n9.12\n\n\nBoards with ≤1 mistake (%)\n25.92\n19.38\n\n\nPer-square error rate (%)\n5.31\n5.94\n\n\n\n\n\n\n\n\n\nFig. 5: Distribution of incorrect squares per predicted board. The model most frequently makes 2–4 errors per board, though outlier examples with 10+ mistakes persist.\n\n\n\n\n6.2 6.2 Confusions\n\n\n6.3 6.3 Qualitative\n\n\n\nFig. 7: Example of model prediction on a validation board. From left to right: original image, ground-truth board matrix, model-predicted matrix. The predicted board achieves a per-square accuracy of 0.984.\n\n\n\n\n6.4 6.4 Training Dynamics\n\n\n\nFig. 8: Training and validation loss curves across all epochs. Smooth convergence reflects the stability of the training setup and the effectiveness of progressive unfreezing."
+  },
+  {
+    "objectID": "index.html#discussion",
+    "href": "index.html#discussion",
+    "title": "Tunix Gemma Reinforcement Learning",
+    "section": "7 Discussion",
+    "text": "7 Discussion"
+  },
+  {
+    "objectID": "index.html#references",
+    "href": "index.html#references",
+    "title": "Tunix Gemma Reinforcement Learning",
+    "section": "8 References",
+    "text": "8 References\nMasouris, Athanasios, and Jan C. van Gemert. End-to-End Chess Recognition. Delft: Delft University of Technology, 2023. https://github.com/ThanosM97/end-to-end-chess-recognition."
+  }
+]

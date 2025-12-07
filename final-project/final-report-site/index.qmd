@@ -1,0 +1,141 @@
+---
+title: "Gemma Fine Tuning with LoRa Adapters"
+subtitle: "Placeholder"
+authors:
+  - name: CJ Jones
+    email: cmj147@georgetown.edu
+    affiliation: Georgetown University
+  - name: Adam Stein
+    email: 
+    affiliation: Georgetown University
+format:
+  html: 
+    embed-resources: True
+    grid:
+      sidebar-width: 0px
+      body-width: 1200px
+      margin-width: 200px
+      gutter-width: 2rem
+    code-fold: true
+    code-tools: true
+    code-summary: "Show Code"
+    smooth-scroll: true
+    toc: true
+    css: styles.css
+    toc-depth: 4
+    number-sections: true
+execute:
+  freeze: auto
+  echo: false
+  message: false
+  warning: false
+---
+
+## Abstract
+
+## Introduction
+
+## Literature Review
+
+## Dataset
+
+::: {.columns}
+::: {.column width="50%"}
+<figure>
+  <img src="./resources/Chess-Board-with-Boxes.png" width="80%" class="shadow padded">
+  <figcaption>Fig. 1: Annotated chess board output from ChessReD Dataset</figcaption>
+</figure>
+  
+:::
+
+::: {.column width="50%"}
+<figure>
+  <img src="./resources/Chess-Board-without-Boxes.jpg" width="80%" class="shadow padded">
+  <figcaption>Fig. 2: Chess board with no bounding boxes output from ChessReD Dataset</figcaption>
+</figure>
+
+:::
+:::
+
+## Methods
+
+### Convolutional Feature Extractor
+
+<figure style="text-align: center;">
+  <img src="./resources/Model_Achitecture_Image.png"
+       width="60%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 3: End-to-end architecture for combined chessboard recognition network</figcaption>
+</figure>
+
+### Training Procedure
+
+:::: {}
+
+| Component              | # Params           | Trainable @ Start? | Trainable @ End |
+|------------------------|--------------------|---------------------|-----------------|
+| ConvNeXt-B backbone    | 88 M               | ❌ frozen           | ✅ last 3 / 12   |
+| Transformer (4 layers) | 17 M               | ❌ frozen           | ✅ last 1 / 4    |
+| Square tokens          | 64 × 1024 ≈ 66 k   | ✅                  | ✅              |
+| Linear head            | 13 k               | ✅                  | ✅              |
+| **Total**              | **105 M**          | 79 k (0.07%)        | ~30 M (28.6%)   |
+
+Fig 4. Summary of model parameter counts, training visibility at start and end of training, and staged unfreezing schedule.
+
+::::
+
+\
+
+## Results
+
+### Error Distribution and Exact-Match Accuracy
+
+
+:::: {}
+| Metric                         | Baseline ResNeXt (2023) | **ConvNeXt-TE (+Tx)** (Ours) |
+|-------------------------------|--------------------------|------------------------------|
+| Mean incorrect squares / board| **3.40**                 | **4.33**                     |
+| Boards with no mistakes (%)   | **15.26**                | **9.12**                     |
+| Boards with ≤1 mistake (%)    | **25.92**                | **19.38**                    |
+| Per-square error rate (%)     | **5.31**                 | **5.94**                     |
+
+::::
+
+\
+
+<figure style="text-align: center;">
+  <img src="./resources/Version_6_Board_Error_Distribution.png"
+       width="60%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 5: Distribution of incorrect squares per predicted board. The model most frequently makes 2–4 errors per board, though outlier examples with 10+ mistakes persist.</figcaption>
+</figure>
+
+### 6.2 Confusions
+
+### 6.3 Qualitative
+
+<figure style="text-align: center;">
+  <img src="./resources/Version_6_Near_Perfect_Predict.png"
+       width="95%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 7: Example of model prediction on a validation board. From left to right: original image, ground-truth board matrix, model-predicted matrix. The predicted board achieves a per-square accuracy of 0.984.</figcaption>
+</figure>
+
+### 6.4 Training Dynamics
+
+<figure style="text-align: center;">
+  <img src="./resources/loss_plot.png"
+       width="70%"
+       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
+  <figcaption>Fig. 8: Training and validation loss curves across all epochs. Smooth convergence reflects the stability of the training setup and the effectiveness of progressive unfreezing.</figcaption>
+</figure>
+
+---
+
+## Discussion
+
+## References
+
+Masouris, Athanasios, and Jan C. van Gemert. End-to-End Chess Recognition. Delft: Delft University of Technology, 2023. https://github.com/ThanosM97/end-to-end-chess-recognition.
+
+
