@@ -1,5 +1,7 @@
 docs/
 
+*Archive/
+
 *.Identifier
 
 # Byte-compiled / optimized / DLL files
