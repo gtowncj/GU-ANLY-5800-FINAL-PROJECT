@@ -1,0 +1,731 @@
+---
+title: Fine-Tune Gemma using Hugging Face Transformers and QloRA
+jupyter: python3
+---
+
+
+
+### Imports
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/, height: 1000}
+#| collapsed: true
+#| executionInfo: {elapsed: 26251, status: ok, timestamp: 1765180568681, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+# Install Pytorch & other libraries
+%pip install "torch>=2.4.0" tensorboard
+
+# Install Gemma release branch from Hugging Face
+%pip install "transformers>=4.51.3"
+
+# Install Hugging Face libraries
+%pip install  --upgrade \
+  "datasets>=3.3.2" \
+  "accelerate==1.4.0" \
+  "evaluate==0.4.3" \
+  "bitsandbytes==0.45.3" \
+  "trl==0.21.0" \
+  "peft==0.14.0" \
+  "protobuf==5.29.1" \
+  "fsspec==2025.3.0" \
+  python-Levenshtein \
+  sentencepiece
+  # flash_attn \
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 2858, status: ok, timestamp: 1765180571557, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+import os
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+
+import jax
+print("JAX backend:", jax.default_backend())
+print("JAX devices:", jax.devices())
+```
+
+```{python}
+from google.colab import drive
+from google.colab import userdata
+from huggingface_hub import login
+
+import os
+from pathlib import Path
+import json
+import random
+import re
+import sqlite3
+
+import torch
+from datasets import load_dataset, Dataset
+import pandas as pd
+import Levenshtein
+
+from huggingface_hub import login
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    BitsAndBytesConfig,
+)
+from peft import LoraConfig
+from trl import SFTConfig, SFTTrainer
+
+# Login into Hugging Face Hub
+hf_token = userdata.get('HF_TOKEN') # If you are running inside a Google Colab
+login(hf_token)
+```
+
+### Setup Repo Structure
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 19448, status: ok, timestamp: 1765180614899, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+drive.mount('/content/drive')
+
+ROOT_DRIVE_DIR = "/content/drive/MyDrive/gemma_lora_ft"
+
+WIKISQL_DIR = Path("/content/WikiSQL")
+DATA_DIR = Path("/content/data")
+```
+
+### System/User Prompt with Prompt Builder
+
+```{python}
+# User prompt template (used in both training & inference)
+
+def generate_raw_prompt(question: str, schema_text: str) -> str:
+    return f"""<INSTRUCTIONS>
+You are a precise text-to-SQL generator. Using the known schema of the sql database you must output only a valid SQL query and nothing else.
+</INSTRUCTIONS>
+
+<SCHEMA>
+{schema_text}
+</SCHEMA>
+
+<QUESTION>
+{question}
+</QUESTION>
+
+<SQL_Query>
+""".strip()
+```
+
+# WikiSQL Dataset
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 9988, status: ok, timestamp: 1765180624910, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+if not os.path.exists(WIKISQL_DIR):
+  !git clone https://github.com/salesforce/WikiSQL
+
+if not os.path.exists(DATA_DIR):
+  !tar xvjf /content/WikiSQL/data.tar.bz2
+```
+
+### SQLite Setup and Table Builder
+
+```{python}
+def load_tables(split="dev"):
+    tables_path = DATA_DIR / f"{split}.tables.jsonl"
+    tables = {}
+    with open(tables_path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            tables[obj["id"]] = obj
+    return tables
+
+
+def iter_split(split="dev"):
+    q_path = DATA_DIR / f"{split}.jsonl"
+    tables = load_tables(split)
+    with open(q_path, "r", encoding="utf-8") as f:
+        for line in f:
+            ex = json.loads(line)
+            table = tables[ex["table_id"]]
+            yield ex, table
+
+
+def build_sqlite_from_table(table_obj):
+    df = pd.DataFrame(table_obj["rows"], columns=table_obj["header"])
+    conn = sqlite3.connect(":memory:")
+    df.to_sql("data", conn, index=False, if_exists="replace")
+    return conn
+
+
+AGG_OPS = ["", "MAX", "MIN", "COUNT", "SUM", "AVG"]
+COND_OPS = ["=", ">", "<", "OP"]
+
+
+def escape_identifier(name: str) -> str:
+    # Escape internal quotes by doubling them
+    cleaned = name.replace('"', '""')
+    return f'"{cleaned}"'
+
+
+def logical_to_sql(sql_obj, table_obj, table_name="data"):
+    sel_idx = sql_obj["sel"]
+    agg_idx = sql_obj["agg"]
+    conds = sql_obj["conds"]
+
+    columns = table_obj["header"]
+    sel_col = escape_identifier(columns[sel_idx])
+    agg = AGG_OPS[agg_idx]
+
+    # FIX: Proper aggregation syntax
+    if agg == "":
+        select_expr = sel_col
+    else:
+        select_expr = f"{agg}({sel_col})"
+
+    query = f"SELECT {select_expr} FROM {table_name}"
+
+    where_clauses = []
+    for col_idx, op_idx, val in conds:
+        col_name = escape_identifier(columns[col_idx])
+        op = COND_OPS[op_idx]
+
+        if isinstance(val, str):
+            v_str = "'" + val.replace("'", "''") + "'"
+        else:
+            v_str = str(val)
+
+        if op == "OP":
+            op = "="
+
+        where_clauses.append(f"{col_name} {op} {v_str}")
+
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+
+    return query
+
+def execute_sql(conn, sql):
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return cur.fetchall(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def make_schema_text(table_obj):
+    """
+    Convert WikiSQL table to the same schema format used for synthetic data,
+    so the model sees consistent inputs.
+    """
+    cols = table_obj["header"]
+    return "\n".join(f"- {c} (TEXT)" for c in cols)
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 1334, status: ok, timestamp: 1765180626268, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+ex, tbl = next(iter_split("train"))
+example_gold_sql = logical_to_sql(ex["sql"], tbl)
+# print("\nWikiSQL sanity check:")
+# print("Question:", ex["question"])
+# print("Gold SQL:", example_gold_sql)
+
+print(ex)
+print(tbl)
+```
+
+### Test SQL Helper Functions
+
+```{python}
+import sqlite3
+import re
+
+def is_sql_syntax_valid(sql):
+    """
+    Checks SQL syntax by replacing table names with a dummy table
+    so that missing tables do NOT cause an error.
+    """
+    sql_clean = sql.strip()
+
+    # Replace any token after FROM or JOIN with the dummy table name
+    sql_clean = re.sub(r"(FROM|JOIN)\s+[\w\.\-]+", r"\1 dummy", sql_clean, flags=re.IGNORECASE)
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE dummy(x TEXT);")
+
+    try:
+        conn.execute(sql_clean)
+        return True
+    except Exception as e:
+        if "no such table" in str(e).lower():
+            return True   # table does not exist → ignore
+        return False
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 13004, status: ok, timestamp: 1765180639298, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+wikisql_valid = 0
+wikisql_total = 0
+wikisql_errors = []
+
+for ex, tbl in iter_split("dev"):
+    wikisql_total += 1
+
+    conn = build_sqlite_from_table(tbl)
+    sql = logical_to_sql(ex["sql"], tbl)
+
+    result, err = execute_sql(conn, sql)
+
+    if err is None:
+        wikisql_valid += 1
+    else:
+        wikisql_errors.append((sql, err))
+
+print(f"WikiSQL valid queries: {wikisql_valid}/{wikisql_total} "
+      f"({wikisql_valid / wikisql_total:.2%})")
+
+print("\nExample WikiSQL errors:")
+if not wikisql_errors:
+    print("No errors — all WikiSQL queries are valid!")
+else:
+    for i, (sql, err) in enumerate(wikisql_errors[:5]):
+        print("SQL:", sql)
+        print("ERROR:", err, "\n")
+```
+
+### Final Data Preprocessing
+
+```{python}
+from datasets import Dataset
+
+def normalize_sql(sql: str) -> str:
+    sql = sql.strip().rstrip(";")
+    sql = sql.replace("`", '"')
+    return sql
+
+def build_completion(sql: str) -> str:
+    sql = normalize_sql(sql)
+    return sql.lstrip() + "\n</SQL_Query>"
+
+def build_training_row_from_wikisql(ex, tbl):
+    schema = make_schema_text(tbl)
+    prompt = generate_raw_prompt(ex["question"], schema)
+    gold_sql = logical_to_sql(ex["sql"], tbl)
+    completion = build_completion(gold_sql)
+
+    return {
+        "prompt": prompt,
+        "completion": completion
+    }
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 2638, status: ok, timestamp: 1765180641962, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+train_rows = []
+for ex, tbl in iter_split("train"):
+    train_rows.append(build_training_row_from_wikisql(ex, tbl))
+
+test_rows = []
+for ex, tbl in iter_split("test"):
+    test_rows.append(build_training_row_from_wikisql(ex, tbl))
+
+val_rows = []
+for ex, tbl in iter_split("dev"):
+    val_rows.append(build_training_row_from_wikisql(ex, tbl))
+
+train_wikisql = Dataset.from_list(train_rows)
+test_wikisql = Dataset.from_list(test_rows)
+val_wikisql = Dataset.from_list(val_rows)
+
+print(train_wikisql)
+print(test_wikisql)
+print(val_wikisql)
+
+print("\n")
+
+for i in range(3):
+    print("PROMPT:\n", train_wikisql[i]["prompt"])
+    print("COMPLETION:\n", train_wikisql[i]["completion"])
+    print("="*80)
+```
+
+# Gemma 3 4B Model
+
+### Load Pretrained Model
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/, height: 650, referenced_widgets: [e588631080fe4733a7e9df8a02cc0c11, bd0fd9bd087e463985c686acb69e489b, e5fc46fd5f4749cc80a46a0eeed29242, 7383bb230ab64a3e90ac8d4f810af387, e7789cd4e4c944f78a69e1063ba1f97e, 9279016cbf5f421a8b539ba2961fb961, 8e35d9c388234788a4812f156043457e, f091f087f4af4de399e8005916a8e1be, 4d0dc30959ae44fd9d2e21a48f140f42, b4ed65dfc95d40be8a7a67718cc9c552, 4216b2746ed44084a8c534b447c1b734, 9e2214dc83574273853d1ff18df66df2, b5f52e5eb2ac499880d719773109fc3e, c1a96ddf649144248a955cf9176bb694, d3afffb38bc246d7becfb0a59db8238a, bf713ec00c8e45bfb0373f8b40b2491f, bdcd2b301afe45159e9022a7527e417d, 7c558f79fa1c4383a97901bb91c14f0b, 79a732df0e9d4b7789c146f714cdfaed, f9c368adeadb429e9324236af114cea5, 35db2224577243449d41357f0db39fd9, b359c2b44aff4474ba44e2dcaacc7c53, 562e8b8f582c4b49a0ff63cf82b27199, b41ba2d56d304cc2b641e4a9a69cf91b, af309a8b55fb4fcd9154a7f64b3bb642, 6e40a3df18574487932fa1fec34b7bb2, b7078bf57dbb403b8a7fe81881d2b7cb, 15b2918d13494ca3bcff342525ab40cd, 08735b1ecac443a0b89b474fa27ea380, 27b16ed68a714f3a98a7e5f7a37e7616, 737bb17e63b043679674792e53b2f7e5, 0ca8b707500647c69b092088cbf01ed3, e1e55ad6712f44de9ab2d776aafa3380, 68306b8ea2be4ff49bc90eeb41ace39b, 33369729be0345f79ef58bbf7e038b25, 595c305266b9478fbf00fe9180ee3cb8, 2baa670b61da42a98568d55176819df9, 922a6b414bd2458d96c6029ee41aa8f0, 43ce2991ebbf49b6827c59577901c5fe, 7bcf777f220345c9bbc739a969379c21, 7280444761254dfc98610041f3cfb061, 04364498697140ba918d64b624fefc1d, aeadcf2666c7465b8db6c71c21d5ef77, bca996ff57b2470d8cc248eff2a6ad0f, 2463726c752f4a21a4663b87a616850a, f11fc1a355f14a03971b5feee4f32991, ab7126b4851d40b9b0119cec1687b762, 181a0a3187ca4c6ba399dfcb997456d9, b613fc39779444968f6f3a8cd8b044f9, 7e4aa8a298d44596a5509c65e0074e30, 99a14c404b47441ca96431bca10a5583, 6f39603647ac4cb39052220ad8f08ac3, 44b8485571214fe0911556fa3a8ffe55, 339e74fb36ae45cb854720ba06a52db5, c4848e2275144bc9a1dc48a0e0a78c97, 7b2b64957bf3400095f5c6d84e93efe3, 8ded81f4945f4c0ca0229c6166c4db90, 1c27ce434e7e4cc89782112684a68310, 9865823cb07e42ffa92c36e3bcd12fcd, ed9df3a1ddbd44159f0227a5da0d0286, 1f016fe2f25c4b6db7b3ae4809ecd977, e8b2c3e29b1047108c5832e224bc8cca, 9d2ecc7ba61547e283447058a146fe18, c6fbda0dc6b14505a8c36767b25a6f91, 12c39c674f294959890d10d5899da73b, 674939ef1f524de8b54f1b9617ddc1f3, 7ddafe5c9d2540d0b60999c1a1b8614b, 736c355839814deaad8ca6e1e7da66c0, c7a1f8bdcae2414898ec49867f1fb0a6, ef642e90590a43299fb5a07d57982e73, a38d913dd1af44729ac84820964d76e2, 48252ace6c974bc898f099126b24b5b7, 1d4a1241d4a14060995d2cb36a4be1de, 1bd4c9edcb3a4d8ca04df39056452caa, f57e2970b88b485097b995b03404a723, 5984daecc0484071bb21ee71b895058e, 2a5822454b1b4f35a2318cdb84fe59cd, 30094a0f82764062bcadb64eb38fb98b, f4b70c5ca1f94240aaf6e90f9549c2ff, 80b38b7f07ec475fa0c24e82da929c10, 25467e52f3004f6995f6640b1f0e65b9, 3e741a639ae640beb7cf9e46e72e4a64, dee40080b8764bf2bc7b2ed5b36b4398, 7e6f0e8494ff46eda89c83b064c3cce4, 0dd9a7d650134744bfde67d8c335fa7a, baea0610b1a8409496d2c6a1a16b13d7, 556b993ed0464b5db4f9666d0da5b6ef, 38f42b0a51bb49c0be039c15daee95a7, ea88eb6a7e8c4f0785c1ff8288ff6647, 45fc6eae75f143098487c6f1bbcd3b69, 07654acd60684161901c01e64bf28267, f44e1224f0fe42b6bfa033806d0a17ad, fb2d803225d44a4b8a1d4e5754f4d1c4, e093fde935ca45cd8ce9c3a374108574, d622507158f54b818a7468dff4040f01, 31814a280b104068a65f4d709bb7e226, 8dae1bc868e14d158cbac7ab382f232b, 1a61d97b05bb45708abf8d5aaa787aac, 90316f92721c43b28cdc95c623c90b6a, dffc3c02e55645a9a1402b8c6db16322, ee1593c780bb4dc5a579388be5ccf17b, 5a71c69409bb45dcb04acbddef77d69f, 06e8f860fa7f4cfd859e9b84b130f762, dfcc64bb316c45979b2252726d2cfd13, 506d5a5a53db4eadab9b8c4db156e5f3, dc6d32da60da48f28811df494ec853cc, 5440f4e3ea9442cabf3ae817e26c6250, abc32605ec754f3dbab12b69dc9b3f12, f299526290d044afb1649c2a90f3d254, 4a362d18c1e54f50ac411f2f36abf05a, 5e6f95e75baf40b0936f75b9851b0cd2, a22f69519ae14ce1bd3856d3f4b52651, 4b3ade5d21cc40139c3c68c802e738db, 6c79b2bd08c5403ea2559bcce80a0962, fdeba2931666478cb9414aaf13fba6e1, 9563d0f51ae8473d9f2aa55bbc09f664, 650388a550ae4fb293b4283f0ac1e871, 321d8079783447f0add0a4f69b66f261, 539514ccf3f74a23816b8539d7ff53c5, bf0a1dd2302d4d35b72a80a1c37f47c2, 18a0adb833404ed2bd41354f88737de9, a31bb6b394ff4455a713de72c5c880ab, fe27b1c931bf40f39bcc5b65fbe4029b, 69d6de4b857c4e32804473d397425086, daa40113dc294684832f2255670d2cf5, 0e79e648c94d4fd4830bcb23b0c2aeee, 5076669f784a4cd39e990f583106f301, 460eb74e487b4ed3bfc04b746ead2eeb, 6f00499fa3444c44bf606bd49ecd9210, ee73af7aacda40a59ebf7fbbcf2d6366, d27f16f038f24328ade0aed8da79fb14, 280fcb41a1144c92adb44fa675362389]}
+#| executionInfo: {elapsed: 42944, status: ok, timestamp: 1765180684914, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+# Hugging Face model id
+model_id = "google/gemma-3-4b-pt"  # pre-trained (not instruction-tuned)
+# For tokenizer we use the instruction-tuned tokenizer
+tokenizer_id = "google/gemma-3-4b-it"
+
+# Select model class based on id
+if model_id == "google/gemma-3-4b-pt":
+    model_class = AutoModelForCausalLM
+else:
+    model_class = AutoModelForImageTextToText
+
+# Choose dtype based on GPU capability
+if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
+    torch_dtype = torch.bfloat16
+else:
+    torch_dtype = torch.float16
+
+# Define model init arguments
+model_kwargs = dict(
+    attn_implementation="sdpa", # Use "flash_attention_2" when running on Ampere or newer GPU
+    torch_dtype=torch_dtype, # What torch dtype to use, defaults to auto
+    device_map="auto", # Let torch decide how to load the model
+)
+
+model_kwargs["quantization_config"] = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type='nf4',
+    bnb_4bit_compute_dtype=model_kwargs['torch_dtype'],
+    bnb_4bit_quant_storage=model_kwargs['torch_dtype'],
+)
+
+
+print("🔄 Loading model...")
+model = model_class.from_pretrained(model_id, **model_kwargs)
+
+print("🔄 Loading tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+
+# Ensure tokenizer has EOS & PAD set correctly for generation & SFT
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "left"
+```
+
+### Generate Cleaned SQL Query from Gemma Model with Prompt
+
+```{python}
+import re
+
+def clean_sql_output(text: str) -> str:
+    """
+    Extract a clean SQL statement from LLM output under the new tag-based format:
+
+        <SQL_Query>
+        SELECT ...
+        </SQL_Query>
+
+    Handles:
+      - missing or extra whitespace
+      - missing closing tags
+      - trailing commentary after </SQL_Query>
+      - selects the FIRST valid SQL statement
+    """
+
+    if not text or not isinstance(text, str):
+        return ""
+
+    raw = text.strip()
+
+    # -------------------------------
+    # 1. Extract content inside <SQL_Query> ... </SQL_Query>
+    # -------------------------------
+    m = re.search(
+        r"<SQL_Query>(.*?)(</SQL_Query>|$)",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if m:
+        candidate = m.group(1).strip()
+    else:
+        # fallback if tag missing
+        candidate = raw
+
+    # Remove any accidental tag echoes
+    candidate = re.sub(r"</?SQL_Query>", "", candidate, flags=re.IGNORECASE).strip()
+
+    # Strip markdown fences if any
+    candidate = re.sub(r"```sql", "", candidate, flags=re.IGNORECASE)
+    candidate = candidate.replace("```", "").strip()
+
+    # Normalize whitespace
+    candidate = re.sub(r"[ \t]+", " ", candidate)
+
+    # -------------------------------
+    # 2. Grab the first SQL keyword (fallback)
+    # -------------------------------
+    sql_start = re.compile(
+        r"\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+TABLE)\b",
+        flags=re.IGNORECASE,
+    )
+
+    match = sql_start.search(candidate)
+    if not match:
+        return candidate  # return raw candidate (probably empty)
+
+    sql = candidate[match.start():].strip()
+
+    # -------------------------------
+    # 3. Remove trailing commentary or extra content
+    # -------------------------------
+    stop_tokens = [
+        "</SQL_Query>",
+        "<INSTRUCTIONS>",
+        "<QUESTION>",
+        "<SCHEMA>",
+        "Explanation:",
+        "Answer:",
+        "Result:",
+        "Note:",
+        "\n#",
+        "```",
+    ]
+
+    end_positions = []
+    for tok in stop_tokens:
+        pos = sql.find(tok)
+        if pos > 0:
+            end_positions.append(pos)
+
+    if end_positions:
+        sql = sql[:min(end_positions)].strip()
+
+    # Remove trailing punctuation
+    sql = sql.rstrip(";` ")
+
+    return sql.strip()
+
+
+
+def generate_sql_from_llm(question: str, schema_text: str, model) -> str:
+    """
+    Generate SQL from a raw text prompt using continuation-style generation.
+    """
+    # Build the same raw prompt used during training
+    prompt = generate_raw_prompt(question, schema_text)
+
+    print(prompt)
+
+    # Tokenize
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    print
+    # Compute input length to slice off the prompt from model output
+    input_len = inputs["input_ids"].shape[-1]
+
+    # Generate continuation
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=150,
+            do_sample=False,  # deterministic for evaluation
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    # Slice off the prompt to isolate model-generated SQL
+    gen_tokens = outputs[0][input_len:]
+    decoded = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+
+    return clean_sql_output(decoded)
+
+
+# SQL similarity score evaluator
+def tokenize_sql(sql: str):
+    sql = sql.lower()
+    sql = re.sub(r"[^a-z0-9_*]", " ", sql)
+    tokens = sql.split()
+    return tokens
+```
+
+### Test Example Prompt on Pretrained Model
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 4301, status: ok, timestamp: 1765180689239, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+print("\n🔎 Single WikiSQL example BEFORE training:")
+ex, tbl = next(iter_split("train"))
+conn = build_sqlite_from_table(tbl)
+schema = make_schema_text(tbl)
+
+# print(ex["question"])
+# print(schema)
+
+print(generate_sql_from_llm(ex["question"], schema, model))
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 3741, status: ok, timestamp: 1765180692981, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+print("\n🔎 Single WikiSQL example BEFORE training:")
+ex, tbl = next(iter_split("train"))
+conn = build_sqlite_from_table(tbl)
+schema = make_schema_text(tbl)
+
+gold_sql = logical_to_sql(ex["sql"], tbl)
+pred_sql = generate_sql_from_llm(ex["question"], schema, model)
+
+gold_res, ge = execute_sql(conn, gold_sql)
+pred_res, pe = execute_sql(conn, pred_sql)
+
+# print("Q:", ex["question"])
+print("Gold:", gold_sql)
+print("Pred:", pred_sql)
+print("Gold result:", gold_res)
+print("Pred result:", pred_res if pe is None else f"ERROR: {pe}")
+```
+
+# Training Pipeline
+
+### LoRA Config
+
+```{python}
+peft_config = LoraConfig(
+    r=32,
+    lora_alpha=16,
+    lora_dropout=0.05,
+    target_modules=[
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ],
+    bias="none",
+    task_type="CAUSAL_LM",
+    modules_to_save=["lm_head", "embed_tokens"]
+)
+```
+
+### SFT Config
+
+```{python}
+from trl import SFTConfig
+
+training_args  = SFTConfig(
+    output_dir="gemma-text-to-sql-train-rank-32",         # directory to save and repository id
+    max_length=512,                         # max sequence length for model and packing of the dataset
+    packing=True,                           # Groups multiple samples in the dataset into a single sequence
+    num_train_epochs=3,                     # number of training epochs
+    per_device_train_batch_size=1,          # batch size per device during training
+    gradient_accumulation_steps=4,          # number of steps before performing a backward/update pass
+    gradient_checkpointing=True,            # use gradient checkpointing to save memory
+    optim="adamw_torch_fused",              # use fused adamw optimizer
+    logging_steps=10,                       # log every 10 steps
+    save_strategy="epoch",                  # save checkpoint every epoch
+    learning_rate=5e-5,                     # learning rate, based on QLoRA paper
+    fp16=True if torch_dtype == torch.float16 else False,   # use float16 precision
+    bf16=True if torch_dtype == torch.bfloat16 else False,   # use bfloat16 precision
+    max_grad_norm=0.3,                      # max gradient norm based on QLoRA paper
+    warmup_ratio=0.03,                      # warmup ratio based on QLoRA paper
+    lr_scheduler_type="constant",           # use constant learning rate scheduler
+    push_to_hub=True,                       # push model to hub
+    report_to="tensorboard",                # report metrics to tensorboard
+)
+```
+
+### SFT Trainer
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/, height: 335, referenced_widgets: [5dfa71b36286444f8285dfd263fd5f32, b0e4b72742a149089e68f6e9dcb4f535, d3b2964d91434abcbf5a200110a5908e, 9355bcfc1c4a448dbad1f7a3d547ddfe, d3dc7715ae054657bcbd4a3119364859, bb4332d14f794707a75ca3b8c2d617c3, 4c263a578ce247748471785f6e206a47, 4b628be252cd407f901a71974cc4e69b, f210661dfd54443a8db7e98b0ec462af, 866789faf17742039d9457ebb4b3e794, 8d6c4d669df746269f24dffecca8b9ec, cb93cd35a01646109e576885e33e4b3c, 8ab405c499a74f2c9bea71b8798b3ab9, fe740d82eb5b42c0a96048a80d5b6298, 14559f2ddb5744eb8df4478d832f22ca, 159b1cbd74ab4582acd7ab748d39a1e8, a95d12f04568473080edb1e90dea9bea, e394b3000fa74aa5bf4f652132126bf3, ee4bcc089d0b403e8b28b9dfa18b387f, 9d60be7f17fc4ea6a39fce8ec5920d5b, e080b99863bf40c3a979c3c9c11d6fed, 559ec80d72f94578ada60fbdbd50c281, 6c3730961a6143e39bf73d97ba0781d9, c463e56ded394241873697b36ac7d490, e7f92821fa344d8bb6a000b281e99905, 4119f23b4df24a1bb66407b2fd3d8414, 16ffed4d183e4e05a87e1dff7d45e277, cfbefda522a84edfa05235f94adab687, f4a1b9136fee4d349ce77843ff537714, aa64168d04de4916841b2006f6e6d6b2, 0b68580e5a2b4b378f6d32fd1af830ca, 90bd3ad59b1a4d9480690f3c601665c2, 3ca8dcef746142708c043d2fd5626d76, 68cd58693c414467b63e6174ad12c3fe, 8e219368b9f04a3d95c61908cf8834bc, bab771af57164a519f895d5687853123, a63ab40bc5284796b53a140cbf7b8230, 548bbc0c915e43e58684be88db37e8df, 861523b531d740f0b77adf427ecdfb0b, 58dc85f8aa8b46309d48e776f072f3f2, ecdb303b352e429aaafe921e50147848, 503276cdcf1842eb9be1963375c4cb27, 1fae90ac545f44eab1524e7d91cefca8, 814b8fc808f14ef79188efed64232d8f, df2a6c4525634ea991e8cf46cb071475, 3e8e0f6cf5344e8f987533199faa2bf6, f18dffca325441c8a6ba950b071164e0, 3d159caced4f428eb3eb204ae2b67437, 763c7d828a66425fab09322daf7f005a, 587afe694e39406186ab326863491f1a, 58613b77cc2646038cd2906e504049a2, 9e2b067d8b6947a4a1ac489887655ecf, d1166c618e2d4381964e9df9074e486a, df983b71999142929fd327d3eefdf2c9, b229eacaf7854afaaf85c481e7308180, 470e569ab7574d74883f949b636dd699, ebc1dbdc9aba42389ffa927d8d13ece5, 4dcb8b6f1e8d483a9415e8fc9a3a72f2, 90c866bbeb87436eaed363de27b65a97, e7ab39063e8641e39dbcfa74933e705c, de4214ef2a4d4a15b8746abf8febb24d, 1b4ef48783d842e59185a748edef95ee, 1c1f89ff557746238f25b29baed57d15, 7696a669df514ba386fcf2c18bdf3dcb, 070f9980507d4553bc0d23f59be45efa, c451ce27be2a422b93f34dcce85fd38d]}
+#| executionInfo: {elapsed: 57259, status: ok, timestamp: 1765180750283, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+trainer = SFTTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_wikisql,
+    eval_dataset=val_wikisql,
+    processing_class=tokenizer,
+    peft_config=peft_config,
+)
+```
+
+### Train Loop & Model Saving
+
+```{python}
+#| colab: {background_save: true, base_uri: https://localhost:8080/, height: 1000, referenced_widgets: [32287851f5974866af16ea833161beee, aea4defd406842deb1da0254f67b9b68, 5edb0f1153f84b85ac33e908573eec61, 6f71019cb14a4e3582530d5d9a64f5e5, 3a64ef3bade14d168fc8432793f3c905, 90077aa5c36a43d7a25fad2eedd59230, d8d44b31e8644ade83b230503c650cf2, 2f65a494b53042ec92d10c463f2cd05d, 0e96d92a4b804c5381d0b72e5be5be5f, f7f5327ae35a43d0a1c14d057ebf9a27, f7194e931bfc436387bd541f1801da81]}
+import datetime
+import json
+import os
+
+# Create a timestamped directory for the current run
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+model_save_dir = f"{ROOT_DRIVE_DIR}/gemma_text_to_sql_run_train_rank_32_{timestamp}"
+
+# Create the directory if it doesn't exist
+Path(model_save_dir).mkdir(parents=True, exist_ok=True)
+
+# Update the output_dir in training_args
+training_args.output_dir = model_save_dir
+
+print(f"Saving model artifacts to: {model_save_dir}")
+
+# Start training, the model will be automatically saved to the Hub and the output directory
+trainer.train()
+
+# Save the final model again to the specified directory
+trainer.save_model(model_save_dir)
+tokenizer.save_pretrained(model_save_dir)
+
+
+log_file_path = os.path.join(model_save_dir, "training_log.json")
+log_history = trainer.state.log_history
+
+with open(log_file_path, "w") as f:
+    json.dump(log_history, f, indent=4)
+
+print(f"Training log saved to: {log_file_path}")
+```
+
+### Clean Cache
+
+
+# Trained Model
+
+### Load Trained Model from Parameters
+
+```{python}
+#| colab: {background_save: true, referenced_widgets: [be73bbd3ceb74b3497e93398552f6f34]}
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+
+BASE_MODEL = "google/gemma-3-4b-pt"
+
+print("Loading base model...")
+base_model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    device_map="auto",
+    torch_dtype=torch.bfloat16
+)
+
+print("Loading LoRA adapter...")
+ft_model = PeftModel.from_pretrained(base_model, model_save_dir)
+
+tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-4b-it")
+```
+
+```{python}
+#| colab: {background_save: true}
+ft_model.print_trainable_parameters()
+```
+
+### Review Example Output of Trained Model
+
+```{python}
+#| colab: {background_save: true}
+print("\n🔎 Single WikiSQL example BEFORE training:")
+ex, tbl = next(iter_split("train"))
+conn = build_sqlite_from_table(tbl)
+schema = make_schema_text(tbl)
+
+gold_sql = logical_to_sql(ex["sql"], tbl)
+pred_sql = generate_sql_from_llm(ex["question"], schema, ft_model)
+
+gold_res, ge = execute_sql(conn, gold_sql)
+pred_res, pe = execute_sql(conn, pred_sql)
+
+# print("Q:", ex["question"])
+print("Gold:", gold_sql)
+print("Pred:", pred_sql)
+print("Gold result:", gold_res)
+print("Pred result:", pred_res if pe is None else f"ERROR: {pe}")
+```
+

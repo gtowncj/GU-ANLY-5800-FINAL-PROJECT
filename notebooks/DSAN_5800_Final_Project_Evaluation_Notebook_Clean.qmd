@@ -1,0 +1,1438 @@
+---
+title: Stand Alone Notebook to Evaluate Fine Tuned Gemma Models
+jupyter: python3
+---
+
+
+
+### Imports
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/, height: 1000}
+#| collapsed: true
+#| executionInfo: {elapsed: 25488, status: ok, timestamp: 1765297092077, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+# Install Pytorch & other libraries
+%pip install "torch>=2.4.0" tensorboard
+
+# Install Gemma release branch from Hugging Face
+%pip install "transformers>=4.51.3"
+
+# Install Hugging Face libraries
+%pip install  --upgrade \
+  "datasets>=3.3.2" \
+  "accelerate==1.4.0" \
+  "evaluate==0.4.3" \
+  "bitsandbytes==0.45.3" \
+  "trl==0.21.0" \
+  "peft==0.14.0" \
+  "protobuf==5.29.1" \
+  "fsspec==2025.3.0" \
+  python-Levenshtein \
+  sentencepiece
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 2808, status: ok, timestamp: 1765297094886, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+import os
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+
+import jax
+print("JAX backend:", jax.default_backend())
+print("JAX devices:", jax.devices())
+```
+
+```{python}
+from google.colab import drive
+from google.colab import userdata
+from huggingface_hub import login
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import os
+from pathlib import Path
+import json
+import random
+import re
+import sqlite3
+
+import torch
+from datasets import load_dataset
+import pandas as pd
+import Levenshtein
+
+from huggingface_hub import login
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    BitsAndBytesConfig,
+)
+from peft import LoraConfig, PeftModel
+from trl import SFTConfig, SFTTrainer
+
+# Login into Hugging Face Hub
+hf_token = userdata.get('HF_TOKEN') # If you are running inside a Google Colab
+login(hf_token)
+```
+
+### Setup Repo Structure
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {elapsed: 21668, status: ok, timestamp: 1765297140641, user: {displayName: CJ Jones, userId: '13898518827327147135'}, user_tz: 300}
+drive.mount('/content/drive')
+
+ROOT_DRIVE_DIR = "/content/drive/MyDrive/gemma_lora_ft"
+
+WIKISQL_DIR = Path("/content/WikiSQL")
+
+DATA_DIR = Path("/content/data")
+
+TRAINED_MODEL_NAME = "gemma_text_to_sql_run_train_rank_32_20251208_075911"
+
+TRAINED_MODEL_DIR = f"{ROOT_DRIVE_DIR}/{TRAINED_MODEL_NAME}"
+```
+
+### System/User Prompt with Prompt Builder
+
+```{python}
+# User prompt template (used in both training & inference)
+
+def generate_raw_prompt(question: str, schema_text: str) -> str:
+    return f"""<INSTRUCTIONS>
+You are a precise text-to-SQL generator. Using the known schema of the sql database you must output only a valid SQL query and nothing else.
+</INSTRUCTIONS>
+
+<SCHEMA>
+{schema_text}
+</SCHEMA>
+
+<QUESTION>
+{question}
+</QUESTION>
+
+<SQL_Query>
+""".strip()
+```
+
+# Load Test WikiSQL Dataset
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765297150598, user_tz: 300, elapsed: 9934, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+if not os.path.exists(WIKISQL_DIR):
+  !git clone https://github.com/salesforce/WikiSQL
+
+if not os.path.exists(DATA_DIR):
+  !tar xvjf /content/WikiSQL/data.tar.bz2
+```
+
+### SQLite Setup and Table Builder
+
+```{python}
+def load_tables(split="dev"):
+    tables_path = DATA_DIR / f"{split}.tables.jsonl"
+    tables = {}
+    with open(tables_path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            tables[obj["id"]] = obj
+    return tables
+
+
+def iter_split(split="dev"):
+    q_path = DATA_DIR / f"{split}.jsonl"
+    tables = load_tables(split)
+    with open(q_path, "r", encoding="utf-8") as f:
+        for line in f:
+            ex = json.loads(line)
+            table = tables[ex["table_id"]]
+            yield ex, table
+
+
+def build_sqlite_from_table(table_obj):
+    df = pd.DataFrame(table_obj["rows"], columns=table_obj["header"])
+    conn = sqlite3.connect(":memory:")
+    df.to_sql("data", conn, index=False, if_exists="replace")
+    return conn
+
+
+AGG_OPS = ["", "MAX", "MIN", "COUNT", "SUM", "AVG"]
+COND_OPS = ["=", ">", "<", "OP"]
+
+
+def escape_identifier(name: str) -> str:
+    # Escape internal quotes by doubling them
+    cleaned = name.replace('"', '""')
+    return f'"{cleaned}"'
+
+
+def logical_to_sql(sql_obj, table_obj, table_name="data"):
+    sel_idx = sql_obj["sel"]
+    agg_idx = sql_obj["agg"]
+    conds = sql_obj["conds"]
+
+    columns = table_obj["header"]
+    sel_col = escape_identifier(columns[sel_idx])
+    agg = AGG_OPS[agg_idx]
+
+    # FIX: Proper aggregation syntax
+    if agg == "":
+        select_expr = sel_col
+    else:
+        select_expr = f"{agg}({sel_col})"
+
+    query = f"SELECT {select_expr} FROM {table_name}"
+
+    where_clauses = []
+    for col_idx, op_idx, val in conds:
+        col_name = escape_identifier(columns[col_idx])
+        op = COND_OPS[op_idx]
+
+        if isinstance(val, str):
+            v_str = "'" + val.replace("'", "''") + "'"
+        else:
+            v_str = str(val)
+
+        if op == "OP":
+            op = "="
+
+        where_clauses.append(f"{col_name} {op} {v_str}")
+
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+
+    return query
+
+def execute_sql(conn, sql):
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return cur.fetchall(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def make_schema_text(table_obj):
+    """
+    Convert WikiSQL table to the same schema format used for synthetic data,
+    so the model sees consistent inputs.
+    """
+    cols = table_obj["header"]
+    return "\n".join(f"- {c} (TEXT)" for c in cols)
+```
+
+### Test SQL Helper Functions
+
+```{python}
+import sqlite3
+import re
+
+def is_sql_syntax_valid(sql):
+    """
+    Checks SQL syntax by replacing table names with a dummy table
+    so that missing tables do NOT cause an error.
+    """
+    sql_clean = sql.strip()
+
+    # Replace any token after FROM or JOIN with the dummy table name
+    sql_clean = re.sub(r"(FROM|JOIN)\s+[\w\.\-]+", r"\1 dummy", sql_clean, flags=re.IGNORECASE)
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE dummy(x TEXT);")
+
+    try:
+        conn.execute(sql_clean)
+        return True
+    except Exception as e:
+        if "no such table" in str(e).lower():
+            return True   # table does not exist → ignore
+        return False
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765297175187, user_tz: 300, elapsed: 24550, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+wikisql_valid = 0
+wikisql_total = 0
+wikisql_errors = []
+
+for ex, tbl in iter_split("test"):
+    wikisql_total += 1
+
+    conn = build_sqlite_from_table(tbl)
+    sql = logical_to_sql(ex["sql"], tbl)
+
+    result, err = execute_sql(conn, sql)
+
+    if err is None:
+        wikisql_valid += 1
+    else:
+        wikisql_errors.append((sql, err))
+
+print(f"WikiSQL valid queries: {wikisql_valid}/{wikisql_total} "
+      f"({wikisql_valid / wikisql_total:.2%})")
+
+print("\nExample WikiSQL errors:")
+if not wikisql_errors:
+    print("No errors — all WikiSQL queries are valid!")
+else:
+    for i, (sql, err) in enumerate(wikisql_errors[:5]):
+        print("SQL:", sql)
+        print("ERROR:", err, "\n")
+```
+
+### Final Data Preprocessing
+
+```{python}
+from datasets import Dataset
+
+def normalize_sql(sql: str) -> str:
+    sql = sql.strip().rstrip(";")
+    sql = sql.replace("`", '"')
+    return sql
+
+def build_completion(sql: str) -> str:
+    sql = normalize_sql(sql)
+    return sql.lstrip() + "\n</SQL_Query>"
+
+def build_training_row_from_wikisql(ex, tbl):
+    schema = make_schema_text(tbl)
+    prompt = generate_raw_prompt(ex["question"], schema)
+    gold_sql = logical_to_sql(ex["sql"], tbl)
+    completion = build_completion(gold_sql)
+
+    return {
+        "prompt": prompt,
+        "completion": completion
+    }
+```
+
+### Build Datasets
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765297177799, user_tz: 300, elapsed: 2562, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+train_rows = []
+for ex, tbl in iter_split("train"):
+    train_rows.append(build_training_row_from_wikisql(ex, tbl))
+
+test_rows = []
+for ex, tbl in iter_split("test"):
+    test_rows.append(build_training_row_from_wikisql(ex, tbl))
+
+val_rows = []
+for ex, tbl in iter_split("dev"):
+    val_rows.append(build_training_row_from_wikisql(ex, tbl))
+
+train_wikisql = Dataset.from_list(train_rows)
+test_wikisql = Dataset.from_list(test_rows)
+val_wikisql = Dataset.from_list(val_rows)
+
+print(train_wikisql)
+print(test_wikisql)
+print(val_wikisql)
+
+# print("\n")
+
+# for i in range(3):
+#     print("PROMPT:\n", train_wikisql[i]["prompt"])
+#     print("COMPLETION:\n", train_wikisql[i]["completion"])
+#     print("="*80)
+```
+
+# Training Visualizations
+
+### Load Training Log
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| collapsed: true
+#| executionInfo: {status: ok, timestamp: 1765297180953, user_tz: 300, elapsed: 3126, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+# Paths
+TRAINING_LOG_PATH = f"{TRAINED_MODEL_DIR}/training_log.json"
+
+# Load JSON list of dicts
+with open(TRAINING_LOG_PATH, "r") as f:
+    log_history = json.load(f)
+
+print("Loaded", len(log_history), "log entries.")
+```
+
+### Plotting Functions
+
+```{python}
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import os
+
+
+# ===========================
+#  PLOTTING UTIL
+# ===========================
+
+def _save_or_show(save_path):
+    """Helper: save figure if path is provided, else show."""
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved plot to: {save_path}")
+    else:
+        plt.show()
+
+
+# ===========================
+#   LOSS CURVE + EMA
+# ===========================
+
+def plot_loss(df: pd.DataFrame, span: int = 50, save_path: str = None):
+    """
+    Plot raw loss + EMA-smoothed loss.
+    """
+    if "loss" not in df.columns:
+        print("No `loss` column found in dataframe.")
+        return
+
+    df = df.copy()
+    df["loss_ema"] = df["loss"].ewm(span=span).mean()
+
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(data=df, x="step", y="loss", alpha=0.4, label="Raw Loss")
+    sns.lineplot(data=df, x="step", y="loss_ema", label=f"EMA Loss (span={span})")
+
+    plt.title("Training Loss (LoRA Rank=32, Alpha=16 | Raw vs EMA Smoothed)")
+    plt.xlabel("Training Step")
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+
+    _save_or_show(save_path)
+
+
+# ===========================
+#   GRADIENT NORM
+# ===========================
+
+def plot_grad_norm(df: pd.DataFrame, save_path: str = None):
+    """
+    Plot gradient norm over training.
+    """
+    if "grad_norm" not in df.columns:
+        print("No `grad_norm` column found in dataframe.")
+        return
+
+    grad_df = df.dropna(subset=["grad_norm"])
+
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(data=grad_df, x="step", y="grad_norm")
+
+    plt.title("Gradient Norm Over Training (LoRA Rank=32, Alpha=16)")
+    plt.xlabel("Training Step")
+    plt.ylabel("Grad Norm")
+    plt.grid(True)
+
+    _save_or_show(save_path)
+
+
+# ===========================
+#   TOKEN ACCURACY
+# ===========================
+
+def plot_token_accuracy(df: pd.DataFrame, save_path: str = None):
+    """
+    Plot mean token accuracy over training.
+    """
+    if "mean_token_accuracy" not in df.columns:
+        print("No `mean_token_accuracy` column found in dataframe.")
+        return
+
+    acc_df = df.dropna(subset=["mean_token_accuracy"])
+
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(data=acc_df, x="step", y="mean_token_accuracy")
+
+    plt.title("Mean Token Accuracy Over Time (LoRA Rank=32, Alpha=16)")
+    plt.xlabel("Training Step")
+    plt.ylabel("Mean Token Accuracy")
+    plt.grid(True)
+
+    _save_or_show(save_path)
+
+
+# ===========================
+#   LEARNING RATE
+# ===========================
+
+def plot_learning_rate(df: pd.DataFrame, save_path: str = None):
+    """
+    Plot learning rate schedule.
+    """
+    if "learning_rate" not in df.columns:
+        print("No `learning_rate` column found in dataframe.")
+        return
+
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(data=df, x="step", y="learning_rate")
+
+    plt.title("Learning Rate Over Training (LoRA Rank=32, Alpha=16)")
+    plt.xlabel("Training Step")
+    plt.ylabel("Learning Rate")
+    plt.grid(True)
+
+    _save_or_show(save_path)
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765297185542, user_tz: 300, elapsed: 4531, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+training_metrics_df = pd.DataFrame(log_history)
+
+plot_loss(training_metrics_df, save_path=f"{TRAINED_MODEL_DIR}/training_loss.png")
+plot_grad_norm(training_metrics_df, save_path=f"{TRAINED_MODEL_DIR}/training_grad_norm.png")
+plot_token_accuracy(training_metrics_df, save_path=f"{TRAINED_MODEL_DIR}/token_accuracy.png")
+```
+
+# Evaluation Functions
+
+### Generate Cleaned SQL Query from Gemma Model with Prompt
+
+```{python}
+import re
+
+def clean_sql_output(text: str) -> str:
+    """
+    Extract a clean SQL statement from LLM output under the new tag-based format:
+
+        <SQL_Query>
+        SELECT ...
+        </SQL_Query>
+
+    Handles:
+      - missing or extra whitespace
+      - missing closing tags
+      - trailing commentary after </SQL_Query>
+      - selects the FIRST valid SQL statement
+    """
+
+    if not text or not isinstance(text, str):
+        return ""
+
+    raw = text.strip()
+
+    # -------------------------------
+    # 1. Extract content inside <SQL_Query> ... </SQL_Query>
+    # -------------------------------
+    m = re.search(
+        r"<SQL_Query>(.*?)(</SQL_Query>|$)",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if m:
+        candidate = m.group(1).strip()
+    else:
+        # fallback if tag missing
+        candidate = raw
+
+    # Remove any accidental tag echoes
+    candidate = re.sub(r"</?SQL_Query>", "", candidate, flags=re.IGNORECASE).strip()
+
+    # Strip markdown fences if any
+    candidate = re.sub(r"```sql", "", candidate, flags=re.IGNORECASE)
+    candidate = candidate.replace("```", "").strip()
+
+    # Normalize whitespace
+    candidate = re.sub(r"[ \t]+", " ", candidate)
+
+    # -------------------------------
+    # 2. Grab the first SQL keyword (fallback)
+    # -------------------------------
+    sql_start = re.compile(
+        r"\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+TABLE)\b",
+        flags=re.IGNORECASE,
+    )
+
+    match = sql_start.search(candidate)
+    if not match:
+        return candidate  # return raw candidate (probably empty)
+
+    sql = candidate[match.start():].strip()
+
+    # -------------------------------
+    # 3. Remove trailing commentary or extra content
+    # -------------------------------
+    stop_tokens = [
+        "</SQL_Query>",
+        "<INSTRUCTIONS>",
+        "<QUESTION>",
+        "<SCHEMA>",
+        "Explanation:",
+        "Answer:",
+        "Result:",
+        "Note:",
+        "\n#",
+        "```",
+    ]
+
+    end_positions = []
+    for tok in stop_tokens:
+        pos = sql.find(tok)
+        if pos > 0:
+            end_positions.append(pos)
+
+    if end_positions:
+        sql = sql[:min(end_positions)].strip()
+
+    # Remove trailing punctuation
+    sql = sql.rstrip(";` ")
+
+    return sql.strip()
+
+
+
+def generate_sql_from_llm(question: str, schema_text: str, model) -> str:
+    """
+    Generate SQL from a raw text prompt using continuation-style generation.
+    """
+    # Build the same raw prompt used during training
+    prompt = generate_raw_prompt(question, schema_text)
+
+    # print(prompt)
+
+    # Tokenize
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    print
+    # Compute input length to slice off the prompt from model output
+    input_len = inputs["input_ids"].shape[-1]
+
+    # Generate continuation
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=150,
+            do_sample=False,  # deterministic for evaluation
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    # Slice off the prompt to isolate model-generated SQL
+    gen_tokens = outputs[0][input_len:]
+    decoded = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+
+    return clean_sql_output(decoded)
+
+
+# SQL similarity score evaluator
+def tokenize_sql(sql: str):
+    sql = sql.lower()
+    sql = re.sub(r"[^a-z0-9_*]", " ", sql)
+    tokens = sql.split()
+    return tokens
+```
+
+### Optional Case Insensitivity Function
+
+```{python}
+def apply_case_insensitive_matching(sql: str) -> str:
+    """
+    Rewrites any equality of the form:
+        "Column" = 'Value'
+    into:
+        "Column" = 'Value' COLLATE NOCASE
+    Only applies to string literal comparisons.
+    """
+
+    # pattern matches: "Column" = 'Value'
+    pattern = r'(".*?")\s*=\s*(\'[^\']*\')'
+
+    def repl(match):
+        col, val = match.groups()
+        return f'{col} = {val} COLLATE NOCASE'
+
+    return re.sub(pattern, repl, sql)
+```
+
+### Semantic Similarity Functions
+
+```{python}
+def jaccard_similarity(sql1: str, sql2: str) -> float:
+    """
+    Jaccard similarity over token sets.
+    Returns value in [0,1].
+    """
+    t1 = set(tokenize_sql(sql1))
+    t2 = set(tokenize_sql(sql2))
+
+    if not t1 and not t2:
+        return 1.0
+    return len(t1 & t2) / len(t1 | t2)
+
+
+def levenshtein_similarity(sql1: str, sql2: str) -> float:
+    """
+    Normalized Levenshtein similarity.
+    1.0 = identical strings.
+    """
+    sql1 = sql1.lower().strip()
+    sql2 = sql2.lower().strip()
+
+    if not sql1 and not sql2:
+        return 1.0
+
+    dist = Levenshtein.distance(sql1, sql2)
+    max_len = max(len(sql1), len(sql2))
+
+    if max_len == 0:
+        return 1.0
+    return 1 - (dist / max_len)
+
+
+```
+
+```{python}
+def extract_select_columns(sql: str):
+    """
+    Extract SELECT columns robustly.
+    Handles cases like:
+       SELECT a, b FROM ...
+       SELECT COUNT(a) FROM ...
+       SELECT MAX("col name") FROM ...
+    """
+    sql = sql.lower().strip()
+    m = re.search(r"select\s+(.*?)\s+from", sql)
+    if not m:
+        return set()
+
+    cols = m.group(1)
+
+    # Remove function wrappers like count(), max(), avg()
+    cols = re.sub(r"\b(count|max|min|sum|avg)\s*\(", "", cols)
+    cols = cols.replace(")", "")
+
+    # Split multiple columns
+    parts = [c.strip(' "\'') for c in cols.split(",")]
+    return set(p for p in parts if p)
+
+
+def extract_where_columns(sql: str):
+    """
+    Extract WHERE clause column names.
+    Handles AND, multiple conditions, operators, quoted columns.
+    """
+    sql = sql.lower().strip()
+    m = re.search(r"where\s+(.*)", sql)
+    if not m:
+        return set()
+
+    conditions = m.group(1)
+
+    # Split by AND
+    conds = re.split(r"\band\b", conditions)
+
+    cols = []
+    for cond in conds:
+        parts = cond.strip().split()
+        if parts:
+            col = parts[0].strip('"\'')
+            cols.append(col)
+
+    return set(cols)
+
+def extract_sql_operators(sql: str):
+    """
+    Extract operators used in SQL conditions.
+    """
+    ops = set()
+    for op in ["=", ">", "<", "!=", "<=", ">=", "like"]:
+        if op in sql.lower():
+            ops.add(op)
+    return ops
+
+
+def structural_similarity(sql1: str, sql2: str):
+    """
+    Returns a dict with:
+       - select_match
+       - where_match
+       - op_match
+    Each value is in [0,1].
+    """
+
+    s1_select = extract_select_columns(sql1)
+    s2_select = extract_select_columns(sql2)
+
+    s1_where = extract_where_columns(sql1)
+    s2_where = extract_where_columns(sql2)
+
+    s1_ops = extract_sql_operators(sql1)
+    s2_ops = extract_sql_operators(sql2)
+
+    def overlap(a, b):
+        if not a and not b:
+            return 1.0
+        return len(a & b) / max(1, len(a | b))
+
+    return {
+        "select_match": overlap(s1_select, s2_select),
+        "where_match": overlap(s1_where, s2_where),
+        "op_match": overlap(s1_ops, s2_ops),
+    }
+```
+
+### Experiment Evaluation Function
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765297191830, user_tz: 300, elapsed: 6165, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+%pip install sacrebleu rouge_score
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/, height: 205, referenced_widgets: [1b2e4494d3164a858c922df0f737057f, 4aa7f337b8cf4788a354443818d3423b, 9a7a4731569b44d581dc45073a477050, be46f16879cb4f77849f7aef0c1e0926, b9de4176d3ee4d77ab40a557427ed035, 6ede72564aff49debb68caeb1f820014, 41816d6cedcd4feaa53cb046a7e6bc3c, 84f1695a31b6448faa9bf80f39914d14, cd4618bb20134067a07ae21d7742da15, da94c6483e1b419083a1bf51eb827cfa, ee6c318eb7ec43b2986ae3b3ad2251fb, 326bc813d8594fb9a2bb6249e5df74a7, cd51c3d04f5a4fefb6c313dab7b8918d, 0cb28bf7b06f41cf80b9d2834ce520b1, 46051a14847049e19b7a1522c1ff47ea, c94a7e4652984889b0a28738e7755fe1, f97a90dc4ecb49fa9505ea07373bf7a4, 9d2cca77c62148d3a9b57764b42b8f2a, d38288f1447f4785ab5d32fed4303e3f, 249f555af69b4c6fb4cbaea10a473e37, 4ca0066747974577bbc89f51a9621d2b, b0415cc699084a2aa45b86a84d7e0f05]}
+#| executionInfo: {status: ok, timestamp: 1765297197976, user_tz: 300, elapsed: 6119, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+import random
+import json
+import time
+from tqdm import tqdm
+import pandas as pd
+import evaluate
+from collections import Counter
+
+# -----------------------------
+#   NEW SUPPORT FUNCTIONS
+# -----------------------------
+
+bleu_metric = evaluate.load("sacrebleu")
+rouge_metric = evaluate.load("rouge")
+
+
+def normalize_sql_for_em(sql: str) -> str:
+    sql = sql.strip().lower()
+    sql = sql.replace("`", '"')
+    sql = " ".join(sql.split())   # Collapse whitespace
+    return sql
+
+
+def sql_tokenize(s: str):
+    s = s.lower()
+    s = re.sub(r'[^a-z0-9_]+', ' ', s)
+    return s.split()
+
+
+def f1_score(pred: str, gold: str):
+    pred_tokens = sql_tokenize(pred)
+    gold_tokens = sql_tokenize(gold)
+
+    common = Counter(pred_tokens) & Counter(gold_tokens)
+    num_same = sum(common.values())
+
+    if len(pred_tokens) == 0 or len(gold_tokens) == 0:
+        return int(pred_tokens == gold_tokens)
+
+    precision = num_same / len(pred_tokens)
+    recall = num_same / len(gold_tokens)
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+# -----------------------------
+#   MAIN ENHANCED EVALUATOR
+# -----------------------------
+
+def evaluate_model(
+    model,
+    sample_fraction=0.10,
+    case_insensitive_sql=True,
+    log_path=None,
+    verbose=False,
+    seed=42
+):
+    """
+    Full evaluation over a sample of the WikiSQL test set.
+    Includes:
+      - Execution validity & correctness
+      - Jaccard / Levenshtein / Structural similarity
+      - BLEU, ROUGE, Exact Match, Token F1
+    Saves:
+      - Row-level log (JSONL)
+      - Summary statistics (appended to same log_path if provided)
+    """
+
+    random.seed(seed)
+
+    examples = list(iter_split("test"))
+    total = len(examples)
+    sample_size = int(total * sample_fraction)
+
+    sampled = random.sample(examples, sample_size)
+
+    rows = []
+    start_time = time.time()
+
+    gold_list = []
+    pred_list = []
+
+    for idx, (ex, tbl) in enumerate(tqdm(sampled, desc="Evaluating")):
+        conn = build_sqlite_from_table(tbl)
+        schema = make_schema_text(tbl)
+
+        # Gold SQL + execution
+        gold_sql = logical_to_sql(ex["sql"], tbl)
+        gold_res, gold_err = execute_sql(conn, gold_sql)
+
+        # Model prediction
+        pred_sql = generate_sql_from_llm(ex["question"], schema, model)
+        pred_sql_exec = apply_case_insensitive_matching(pred_sql) if case_insensitive_sql else pred_sql
+        pred_res, pred_err = execute_sql(conn, pred_sql_exec)
+
+        # Track for ROUGE/BLEU/EM/F1
+        gold_list.append(gold_sql)
+        pred_list.append(pred_sql)
+
+        # Custom similarity metrics
+        jac = jaccard_similarity(gold_sql, pred_sql)
+        lev = levenshtein_similarity(gold_sql, pred_sql)
+        struct = structural_similarity(gold_sql, pred_sql)
+
+        # Execution scoring
+        exec_valid = (pred_err is None)
+        exec_correct = (exec_valid and gold_err is None and pred_res == gold_res)
+
+        rows.append({
+            "question": ex["question"],
+            "schema": schema,
+            "gold_sql": gold_sql,
+            "pred_sql": pred_sql,
+            "pred_sql_exec": pred_sql_exec,
+            "gold_res": gold_res,
+            "pred_res": pred_res,
+            "gold_err": gold_err,
+            "pred_err": pred_err,
+            "exec_valid": exec_valid,
+            "exec_correct": exec_correct,
+            "jaccard": jac,
+            "levenshtein": lev,
+            "select_match": struct["select_match"],
+            "where_match": struct["where_match"],
+            "op_match": struct["op_match"],
+        })
+
+        if verbose and idx % 50 == 0:
+            print(f"[{idx}/{sample_size}] exec_valid={exec_valid} exec_correct={exec_correct}")
+
+    # Build row-level DataFrame
+    df = pd.DataFrame(rows)
+
+    # -----------------------------
+    #   GLOBAL METRIC COMPUTATION
+    # -----------------------------
+
+    # BLEU
+    bleu_score = bleu_metric.compute(
+        predictions=[p.lower() for p in pred_list],
+        references=[[g.lower()] for g in gold_list]
+    )
+
+    # ROUGE
+    rouge_scores = rouge_metric.compute(
+        predictions=[p.lower() for p in pred_list],
+        references=[g.lower() for g in gold_list]
+    )
+
+    # Exact Match
+    em_scores = [
+        normalize_sql_for_em(p) == normalize_sql_for_em(g)
+        for p, g in zip(pred_list, gold_list)
+    ]
+    em = sum(em_scores) / len(em_scores)
+
+    # Token F1
+    f1_scores = [
+        f1_score(p, g)
+        for p, g in zip(pred_list, gold_list)
+    ]
+    avg_f1 = sum(f1_scores) / len(f1_scores)
+
+    # Execution metrics
+    exec_valid_rate = df["exec_valid"].mean()
+    exec_correct_rate = df["exec_correct"].mean()
+
+    # -----------------------------
+    #   SUMMARY DICTIONARY
+    # -----------------------------
+    summary = {
+        "samples_evaluated": sample_size,
+        "execution_valid_rate": exec_valid_rate,
+        "execution_correct_rate": exec_correct_rate,
+        "BLEU": bleu_score,
+        "ROUGE": rouge_scores,
+        "Exact_Match": em,
+        "Token_F1": avg_f1,
+        "avg_jaccard": df["jaccard"].mean(),
+        "avg_levenshtein": df["levenshtein"].mean(),
+    }
+
+    # -----------------------------
+    #   LOG RESULTS (JSONL + summary)
+    # -----------------------------
+    if log_path:
+        # Save row-level predictions
+        df.to_json(log_path, orient="records", lines=True)
+
+        # Save summary as separate JSON
+        summary_path = log_path.replace(".jsonl", "_summary.json")
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+
+        print(f"\nSaved detailed log to: {log_path}")
+        print(f"Saved summary statistics to: {summary_path}")
+
+    elapsed = time.time() - start_time
+    print(f"\nEvaluation completed in {elapsed/60:.2f} minutes.")
+    print("\nSummary Metrics:\n", json.dumps(summary, indent=2))
+
+    return df, summary
+```
+
+### Experiment Evaluation Result Helper Functions
+
+```{python}
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+
+sns.set_theme(style="whitegrid")
+
+
+# =====================================================
+# 1. EXECUTION SUMMARY
+# =====================================================
+def plot_execution_summary(df, save=False, save_path="execution_summary.png"):
+    summary = pd.DataFrame({
+        "Metric": ["Execution Valid", "Execution Correct"],
+        "Proportion": [
+            df["exec_valid"].mean(),
+            df["exec_correct"].mean()
+        ]
+    })
+
+    plt.figure(figsize=(8, 5))
+    ax = sns.barplot(
+        data=summary,
+        x="Metric",
+        y="Proportion",
+        hue="Metric",
+        palette=["#76a5ff", "#4c8aff"],
+        dodge=False
+    )
+    ax.set_ylim(0, 1)
+    ax.set_title("SQL Execution Performance Overview (Baseline)", fontsize=17, weight="bold")
+    ax.set_ylabel("Proportion of Predictions")
+
+    for container in ax.containers:
+        ax.bar_label(container, fmt="%.2f", fontsize=12, label_type="center")
+
+    plt.tight_layout()
+    if save:
+        plt.savefig(save_path, bbox_inches="tight")
+    plt.show()
+
+
+# =====================================================
+# 2. SIMILARITY DISTRIBUTION HISTOGRAMS
+# =====================================================
+def plot_similarity_distributions(df, save=False, save_path="similarity_scores.png"):
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+
+    sns.histplot(df["jaccard"], kde=True, ax=axes[0], bins=25, color="#4a90e2")
+    axes[0].set_title("Jaccard Similarity Distribution (Baseline)", fontsize=15, weight="bold")
+    axes[0].set_xlabel("Jaccard Score")
+    axes[0].set_xlim(0, 1)
+
+    sns.histplot(df["levenshtein"], kde=True, ax=axes[1], bins=25, color="#50c878")
+    axes[1].set_title("Levenshtein Similarity Distribution (Baseline)", fontsize=15, weight="bold")
+    axes[1].set_xlabel("Normalized Levenshtein Score")
+    axes[1].set_xlim(0, 1)
+
+    fig.suptitle("Semantic Similarity Between Gold & Predicted SQL", fontsize=18, weight="bold")
+    plt.tight_layout()
+
+    if save:
+        plt.savefig(save_path, bbox_inches="tight")
+    plt.show()
+
+
+# =====================================================
+# 3. ERROR BREAKDOWN (Improved layout + centered labels)
+# =====================================================
+def plot_error_breakdown(df, save=False, save_path="error_breakdown.png"):
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    sns.countplot(
+        data=df,
+        y="err_type",
+        palette=["#8BC6FF", "#FFD39B", "#FF9B8E"],
+        ax=ax
+    )
+
+    ax.set_title("SQL Prediction Error Breakdown (Baseline)", fontsize=18, weight="bold")
+    ax.set_xlabel("Number of Cases")
+    ax.set_ylabel("Error Category")
+
+    # Center numeric labels inside bars
+    for container in ax.containers:
+        ax.bar_label(container, fontsize=12, label_type="center")
+
+    # Move explanation to right side
+    fig.text(
+        0.72, 0.55,
+        "Legend:\n"
+        "✓ Correct — matches gold result\n"
+        "⚠ Wrong Result — valid SQL, wrong output\n"
+        "✗ SQL Error — syntax/execution failure",
+        fontsize=11,
+        va="center",
+        bbox=dict(facecolor="white", edgecolor="gray", alpha=0.8)
+    )
+
+    plt.subplots_adjust(right=0.72)
+
+    if save:
+        fig.savefig(save_path, bbox_inches="tight")
+    plt.show()
+
+
+# =====================================================
+# 4. BLEU / ROUGE OVERVIEW CHART
+# =====================================================
+def plot_text_metrics(summary_dict, save=False, save_path="nlp_metrics.png"):
+    metrics = {
+        "BLEU": summary_dict["BLEU"]["score"],
+        "ROUGE-L": summary_dict["ROUGE"]["rougeL"],
+        "Exact Match": summary_dict["Exact_Match"],
+        "Token F1": summary_dict["Token_F1"]
+    }
+
+    plt.figure(figsize=(9, 5))
+    ax = sns.barplot(
+        x=list(metrics.keys()),
+        y=list(metrics.values()),
+        palette="viridis"
+    )
+
+    ax.set_ylim(0, 1)
+    ax.set_title("Text-Based SQL Generation Metrics (Baseline)", fontsize=18, weight="bold")
+    ax.set_ylabel("Score (0-1)")
+
+    for container in ax.containers:
+        ax.bar_label(container, fmt="%.3f", fontsize=12, label_type="center")
+
+    plt.tight_layout()
+    if save:
+        plt.savefig(save_path, bbox_inches="tight")
+    plt.show()
+
+
+# =====================================================
+# 5. EXACT MATCH / TOKEN F1 DISTRIBUTIONS
+# =====================================================
+def plot_em_f1_distributions(df, save=False, save_path="em_f1_dist.png"):
+    plt.figure(figsize=(12, 5))
+
+    metrics_df = pd.DataFrame({
+        "Exact Match": df["em"],
+        "Token F1": df["f1"]
+    })
+
+    sns.boxplot(data=metrics_df, palette="Set2")
+
+    plt.title("Exact Match & Token F1 Distribution (Baseline)", fontsize=17, weight="bold")
+    plt.ylabel("Score")
+
+    if save:
+        plt.savefig(save_path, bbox_inches="tight")
+    plt.show()
+
+
+# =====================================================
+# 6. SCATTER: SIMILARITY vs EXECUTION CORRECTNESS
+# =====================================================
+def plot_similarity_vs_correctness(df, save=False, save_path="similarity_vs_correctness.png"):
+    plt.figure(figsize=(8, 6))
+
+    sns.scatterplot(
+        data=df,
+        x="jaccard",
+        y="levenshtein",
+        hue="exec_correct",
+        palette={True: "#1f77b4", False: "#ff7f0e"},
+        alpha=0.7
+    )
+
+    plt.title("Similarity Scores vs SQL Execution Correctness (Baseline)", fontsize=17, weight="bold")
+    plt.xlabel("Jaccard")
+    plt.ylabel("Levenshtein")
+
+    if save:
+        plt.savefig(save_path, bbox_inches="tight")
+    plt.show()
+
+
+# =====================================================
+# 7. RADAR CHART (Overall Model Quality Profile)
+# =====================================================
+def plot_radar_summary(summary_dict, save=False, save_path="radar_summary.png"):
+    labels = ["BLEU", "ROUGE-L", "Exact Match", "Token F1"]
+    values = [
+        summary_dict["BLEU"]["score"],
+        summary_dict["ROUGE"]["rougeL"],
+        summary_dict["Exact_Match"],
+        summary_dict["Token_F1"]
+    ]
+
+    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False)
+    values = np.concatenate((values, [values[0]]))
+    angles = np.concatenate((angles, [angles[0]]))
+
+    fig, ax = plt.subplots(figsize=(7, 7), subplot_kw=dict(polar=True))
+    ax.plot(angles, values, linewidth=2, linestyle='solid')
+    ax.fill(angles, values, alpha=0.25)
+
+    ax.set_thetagrids(angles[:-1] * 180/np.pi, labels)
+    ax.set_title("Model Quality Radar Chart (Baseline)", fontsize=18, weight="bold")
+
+    ax.set_ylim(0, 1)
+
+    if save:
+        plt.savefig(save_path, bbox_inches="tight")
+    plt.show()
+```
+
+# Load Trained Model
+
+### Load Baseline Model
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/, height: 453, referenced_widgets: [8a3c2986e7174afd84f3e9fc581a6ffb, 93e43fb0d6b941cf9e3fc766804a1fa7, 408f8ba49f164cc6864714d9378ca168, 42333a2746e7445e86a18c2277815646, dbbc1fdf53754ad6a6c2666a1f5aa9a4, d461e4df7c444e56b3ea9b6df86e9d71, 13e4f8c290994510b9e6c23166e933d4, da18ceeb3c8549fab5b88168e775b025, fcfdb62537c842478cf8e42b2fdf937b, af29ae83f2c74af59ccfe620f120f609, 2dcad22070fc45a3adfb2409a1a53ff8, ce3c451e47694db8bba28e3b51faea93, 738fd9099fb7488dbcba4fbf56bf075a, 2e92fc6e2dd04950bb6a7924b26b3d99, 63494da8ae734a34b931310a21627cb9, 7ec947a2e333475d85c754e6fccdced9, 40111263d9454228b2a409fcd41cd8e0, 4ff387bdd0814bb2969d8290dc286fa5, 72a82662d31f4fa28595d7eeab545d7e, e58cc2cfcbae41a28262fd51ef70f620, b068d27496a84d7ca6ecf3833212ed51, 99ee13aed3274f4fb1932c6125b46cf8, b5790b4abb34480da23c84b362a9a0c5, 52bd8c08547b4e728d90189dd086df9e, e708d6e90b0d44599d182cf68dfc1662, 83256806f3904a4881a59f5209e51ad2, 0c029289c2844ab59b03e9a9b942f80b, e18ba0c3e56d4761aa09f889b9240050, 0fa77da93cca46a09339528cefdebce5, ff57ddf173ab4214a5c2f1cfeb1fcf09, dc782349018b4a20b74a436d8f0a6833, eb0cab2808464876a63113b0ab6577aa, b5b80735303a4485961e2c0d77a4c444, a67a04ecf8454f6f9c46ddba9eabd56a, 588ab7aa56a547b081289d574c61fc5c, d11950270121484fa5a15c0aff3a1ff1, 8bb9e1aa9d4a48a19ebe22d79d9d2d6b, 3894477046a04bf19cef0dd6ed686a96, 41079e66e4c94fc18d179179fc6a7aa0, 675c715d34404f2998e18974bcc2b6bf, db302f9ceb8842bc9bde096c00d121a3, a9c6868ca50048939b361f024829b896, 06fecf9bb4734d58863c8827fe930862, de7feafeeaff446bb10ce188418395c0, 1ad970fe244c47e7bcf37793c064db35, 43f715ea45314beba84ce00bcd8ac785, 15cef9d46e4148dba2966a2efcc4c366, 73ae5337cdb542e4b35f01f52b10b2e1, 015b52425ae34073a88068b025712777, d51290d6c2a449fb8e7febd33a64afa9, c5e527a8481844d189d3e86636405095, 317d50ada31d458d992ed8cf0991bab2, 293455bc35774700af3a14f814ca3c08, 82530038cec84f328b1c77d5e965b021, 8a6c0285841f44748c23a5f9def5eb15, b1c342c6dad341d0a5399cd3f5cfeed9, 664cc67ca31243d692a6a97e5581f347, 720a57f2072147168a4b14efccba7fe9, bb34fab7280241c5bdcea1c710638c77, 5d459a5402bc4e80bbe4e9b88c689252, 1166e5e65a08402a8e5dc7a793c8307c, 0ac28c74caf446249a5926103720010c, a184bf7898864942aaeb4f5c68947043, f22d954c2773431b87e1e12a03d99a13, ffe59dcf2a4a4dbe82b5997b975f02bd, 3a30ff43c00e4f0eb52cd3f0625672a1, 95c83fc801164f08a5a12293dbb49bbd, b788344f1e0a40868d39986099ff5343, 2aab04524bd1465f9eef4a2def1dfaeb, 99bf10fcbd954660b3d82464b2a90809, d6da830d4f774b5f91aec6b24c1ce76f, c13f5fbf8abc439bb93f166e83177ce2, 7410c1438ce74a74b18656cca39382e8, 5f1e5bdbe77a429594a5a8da0d254eaa, 42a62fa0b12846b0a30fc2d1b28f6dff, 19aba6ec70b640058fc174949309e261, 42946a8278f84109af675d40882a1844, 6e503afdeb6c40678e71ecd05f284ede, 4eee99847bf643fb95ba573872464b10, 5cbdeb30347449f2ba3a77d026f456e6, 225cddf0f45a464e98c012405ed29424, 0975d04a5ad64298ba55a60ec7525d33, d3c299aa2bb84ed8b55954a4aa0823db, 322a1d2e24134c3b828890eb468ca139, f1d7cab23eab42c8bc22abe5365e2087, b4f18b6c61a04370a8fd8e48da0c763d, 931a20b53f77481faf5a39be6a65385e, 41b059adf1b844e59ee0d06d66080c5a, 927596c6aac647faa44c6cf7508e483b, cfb34292f5e4475fa5f16d142eb053ea, f8448ce61c1d4bcc8c1246eee486c613, 41a0782204624cfebd04750fbde471d5, ebede61cacd04e2788093de149081c89, fb649533fd8b48a78447966bfb3a796a, 221ee08f896e4dcca347271d87c899e8, 491787d582264295928e94a1c283762c, 1215cdc17953464181b47cb9fd68235c, d40a3c700a7d4fa7bb8f1c82c9b06647, 784dd959c87a42eda3b88a14e447ad90, a3efd56154a04eaab230fbc39219d5f4, 71153b3615fa47d3ad9deebd2638f139, 112ef3e759e647c6a7545ed8310c6bfc, 42c7e6d00036452687b69e1597d0f6cd, 741d69e6b5954adcb61fc2e59223034a, 53002dfaf90144efa8b2e39cf4f56565, 7a939dd4fcde4cfa9a6cc6308c12780d, d603b610c17249e3975da3651b8f4105, 651ca76f6f5c4ceaa17b11f404d334c1, 0cdaf38fa6f24fb1b3b63764c274a887, e91b00fb195b4bbc96a2b47a0da9ac8a, 8fd615661f58444b959bd035d3073a39, 2cc1fd4a4e0d459eb964a7161e658302, f8ce2669a4584bb6826e9a5465e445a1, bb29cb5563564da7843100e7c67fc78b, 2a44969e7c3b4e5694a2b5fb52f6c916, d829d645b1ec44c7a3ed0e27eeda062d, 27cebd1e11ae4a07baa4c497a23c71d2, efeb0c986d0243a3b98355cd63bfb0b0, d37ba01bf3424ae1ad10c9718e5af0bc, 10a1310fbf784e7cb159078f9d2ff238, 35d65719c8a54021bda66d922794d93a, 2fd7b854afe6498c94a7d5865210a699, d8a4fab5db8b4be6a35106063d01bf45, 21d523af9f8d4000a1cba54713497249, 0ba6756b782b4bb0bc28e0b604389ed4, 4393d54e57c94c0f9706ba1b01d73aff, 4757709b8f93487f85c6a33517c363b4, 6c0eb32365724d8db224949854d74185, af8dae5dd51b45b2993edf8b03eb2b23, b69dadad808e4430841712f7b0d3d846, 91e08bf8537a42caab0e95941fe1782d, 053a0482e29c4b748dfaa720387c7de1]}
+#| executionInfo: {status: ok, timestamp: 1765297434376, user_tz: 300, elapsed: 236350, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+# Hugging Face model id
+model_id = "google/gemma-3-4b-pt"  # pre-trained (not instruction-tuned)
+# For tokenizer we use the instruction-tuned tokenizer
+tokenizer_id = "google/gemma-3-4b-it"
+
+# Select model class based on id
+if model_id == "google/gemma-3-4b-pt":
+    model_class = AutoModelForCausalLM
+else:
+    model_class = AutoModelForImageTextToText
+
+# Choose dtype based on GPU capability
+if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
+    torch_dtype = torch.bfloat16
+else:
+    torch_dtype = torch.float16
+
+# Define model init arguments
+model_kwargs = dict(
+    attn_implementation="sdpa", # Use "flash_attention_2" when running on Ampere or newer GPU
+    torch_dtype=torch_dtype, # What torch dtype to use, defaults to auto
+    device_map="auto", # Let torch decide how to load the model
+)
+
+model_kwargs["quantization_config"] = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type='nf4',
+    bnb_4bit_compute_dtype=model_kwargs['torch_dtype'],
+    bnb_4bit_quant_storage=model_kwargs['torch_dtype'],
+)
+
+
+print("🔄 Loading model...")
+base_model = model_class.from_pretrained(model_id, **model_kwargs)
+
+print("🔄 Loading tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+
+# Ensure tokenizer has EOS & PAD set correctly for generation & SFT
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "left"
+```
+
+### Apply LoRA Adapters
+
+```{python}
+# ft_model = PeftModel.from_pretrained(base_model, TRAINED_MODEL_DIR)
+# ft_model.print_trainable_parameters()
+```
+
+### Test Model Output Anecdotally
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765297446637, user_tz: 300, elapsed: 12238, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+examples = list(iter_split("test"))
+
+for i in range(5):                        # get 5 examples
+    ex, tbl = examples[i+1000]
+
+    conn = build_sqlite_from_table(tbl)
+    schema = make_schema_text(tbl)
+
+    gold_sql = logical_to_sql(ex["sql"], tbl)
+    pred_sql = generate_sql_from_llm(ex["question"], schema, base_model)
+
+    gold_res, ge = execute_sql(conn, gold_sql)
+
+    pred_sql = apply_case_insensitive_matching(pred_sql)
+    pred_res, pe = execute_sql(conn, pred_sql)
+
+    print(f"\n### Example {i}")
+    print("Q:", ex["question"])
+    print("Gold:", gold_sql)
+    print("Pred:", pred_sql)
+    print("Gold result:", gold_res)
+    print("Pred result:", pred_res if pe is None else f"ERROR: {pe}")
+```
+
+# Final Comparison Experiment
+
+### Setup Experiment
+
+### Run Experiment On Baseline Model
+
+### Run Experiment on (3)? Trained Models
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765265690697, user_tz: 300, elapsed: 4331893, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+eval_df, summary_metrics = evaluate_model(
+    base_model,
+    sample_fraction=0.10,
+    case_insensitive_sql=True,
+    log_path=f"{TRAINED_MODEL_DIR}/eval_results_baseline.jsonl",
+    verbose=True,
+    seed=42
+)
+```
+
+### Optional Load in Eval Statistics
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765297568081, user_tz: 300, elapsed: 43, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+eval_df = pd.read_json(f"{TRAINED_MODEL_DIR}/eval_results_baseline.jsonl", lines=True)
+summary_metrics = json.load(open(f"{TRAINED_MODEL_DIR}/eval_results_baseline_summary.json", "r"))
+print("DataFrame loaded successfully.")
+print(eval_df.head())
+print(summary_metrics)
+```
+
+### Process Evaluation Output
+
+```{python}
+# print(summary_metrics)
+# print(summary_metrics)
+
+def classify_error(row):
+    if row["exec_correct"]:
+        return "Correct"
+    if row["exec_valid"]:
+        return "Wrong Result"
+    return "SQL Error"
+
+def compute_exact_match(gold, pred):
+    return gold.strip() == pred.strip()
+
+def compute_f1(gold, pred):
+    gold_tokens = gold.lower().split()
+    pred_tokens = pred.lower().split()
+    common = len(set(gold_tokens) & set(pred_tokens))
+    if len(gold_tokens) == 0 or len(pred_tokens) == 0:
+        return 0.0
+    precision = common / len(pred_tokens)
+    recall = common / len(gold_tokens)
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+```
+
+```{python}
+
+eval_df["err_type"] = eval_df.apply(classify_error, axis=1)
+eval_df["em"] = eval_df.apply(lambda r: compute_exact_match(r["gold_sql"], r["pred_sql"]), axis=1)
+eval_df["f1"] = eval_df.apply(lambda r: compute_f1(r["gold_sql"], r["pred_sql"]), axis=1)
+```
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/}
+#| executionInfo: {status: ok, timestamp: 1765297574193, user_tz: 300, elapsed: 32, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+print(type(eval_df))
+print(eval_df.columns)
+
+print(eval_df.head())
+```
+
+### Plot Execution and Other Evaluation Metrics
+
+```{python}
+#| colab: {base_uri: https://localhost:8080/, height: 1000}
+#| executionInfo: {status: ok, timestamp: 1765297581855, user_tz: 300, elapsed: 2640, user: {displayName: CJ Jones, userId: '13898518827327147135'}}
+# 1. Execution summary
+plot_execution_summary(
+    eval_df,
+    save=True,
+    save_path=f"{TRAINED_MODEL_DIR}/execution_summary_baseline.png"
+)
+
+# 2. Similarity distributions
+plot_similarity_distributions(
+    eval_df,
+    save=True,
+    save_path=f"{TRAINED_MODEL_DIR}/similarity_distributions_baseline.png"
+)
+
+# 3. Error type breakdown
+plot_error_breakdown(
+    eval_df,
+    save=True,
+    save_path=f"{TRAINED_MODEL_DIR}/error_breakdown_baseline.png"
+)
+
+# 4. NLP text metrics (BLEU, ROUGE, EM, F1)
+plot_text_metrics(
+    summary_metrics,
+    save=True,
+    save_path=f"{TRAINED_MODEL_DIR}/nlp_text_metrics_baseline.png"
+)
+
+# 5. Exact Match & F1 distributions
+plot_em_f1_distributions(
+    eval_df,
+    save=True,
+    save_path=f"{TRAINED_MODEL_DIR}/em_f1_distribution_baseline.png"
+)
+
+# 6. Similarity vs correctness scatter plot
+plot_similarity_vs_correctness(
+    eval_df,
+    save=True,
+    save_path=f"{TRAINED_MODEL_DIR}/similarity_vs_correctness_baseline.png"
+)
+
+# 7. Radar chart of overall model performance
+plot_radar_summary(
+    summary_metrics,
+    save=True,
+    save_path=f"{TRAINED_MODEL_DIR}/radar_summary_baseline.png"
+)
+```
+
+
