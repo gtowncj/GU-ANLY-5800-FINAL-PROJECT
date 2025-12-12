@@ -35,17 +35,17 @@ execute:
 
 ## Abstract
 
-A core competency of recent Large Language Models is an increasingly strong performance on structured translation tasks. The ability to convert natural-language text into computer-understandable formats, such as SQL, offers new opportunities to transform abstract data requests into precise, repeatable queries. The process from text to SQL involves translating written text, such as English, into SQL queries that can be executed on running databases. This task is challenging because, for low-parameter language models, SQL queries need to be generated from variable database schemas, and SQL has strict syntax requirements, making logical forms very fragile to small perturbations. Since it is computationally expensive to train a full-scale large language model for these specific tasks. Also, for any non-enterprise application, it is practically infeasible. Moreover, relying on business model APIs can also lead to resource limitations. Therefore, this project aims to investigate whether applying a parameter-efficient fine-tuning approach, Low-Rank Adaptation (LoRA), can make Google's Gemma-3 4B model, specifically designed for basic text-to-SQL tasks. This project constructed a supervised fine-tuning pipeline. Keeping the pre-trained backbone network remains fixed, using a rank thirty-two LoRA adapter applied to all major projection matrices and quantized in four-bit NF4 precision. A large text-to-SQL corpus, WikiSQL, provides general SQL generation competency, while evaluation occurs on a held-out set of bifurcated WikiSQL tables to measure generalization.
+A core competency of recent Large Language Models is an increasingly strong performance on structured translation tasks. The ability to convert natural language text into formats understandable by computers, such as SQL, offers new opportunities to transform unstructured data requests into precise, repeatable queries. This process, known as text-to-SQL generation, involves translating written text into SQL queries that can be executed on running databases. Although straightforward, this task presents several challenging obstacles. SQL queries need to be generated from variable database schemas, SQL has strict syntax requirements, and small differences in natural language prompting can make executable outputs very fragile to small perturbations in token arrangement. Since it is computationally expensive and practically infeasible to train a full-scale large language model for any non-enterprise application, this project aims to investigate whether a recently released low parameter LLM, Google's Gemma-3 4B model, can be fine-tuned to perform a variety of basic text-to-SQL tasks. Instead of updating all of the model’s weights, fine-tuning is accomplished using a parameter-efficient method called Low-Rank Adaptation (LoRA), which introduces small trainable adapter modules into the otherwise frozen model, making the process computationally efficient and more feasible for limited resources. This project constructs a supervised fine-tuning pipeline that keeps the pre-trained backbone network fixed and uses a rank thirty-two LoRA adapter applied to all major projection matrices and quantized in four-bit NF4 precision. A large text-to-SQL corpus, WikiSQL, provides general SQL generation competency, while evaluation occurs on a held-out set of bifurcated WikiSQL tables to measure generalization.
 
-Based on the results, compared with the baseline model, the trained LoRA model shows significant improvements in SQL correctness, execution success, and semantic similarity, indicating that, through fine-tuning, the general-purpose language model can adapt to the text-to-SQL task effectively while remaining computationally efficient.  The evaluation pipeline runs the predicted SQL queries against SQLite databases, and during the process, checks both the query results and text similarity. Therefore, the trained model performs much better in SQL validity, execution accuracy, and query similarity. These results demonstrate the effectiveness of LoRA-based adaptation for SQL generation tasks in low-resource computational settings.
+Based on the evaluation results, the LoRA-fine-tuned Gemma model exhibits a substantial performance improvement over the baseline across all measured dimensions. While the baseline model fails to produce a single executable SQL query, the LoRA-adapted model achieves correct execution on over half of evaluated examples, with more than 99 percent of generated queries being syntactically valid. Text-based similarity metrics show corresponding gains, with BLEU increasing from 12.6 to 95.2, ROUGE-L from 0.67 to 0.97, and token-level F1 from 0.69 to 0.99. These results demonstrate that parameter-efficient fine-tuning enables a general-purpose language model to reliably acquire structured query generation capabilities, yielding large accuracy improvements without modifying or retraining the underlying pretrained backbone.
 
 ## Introduction
 
-Text-to-SQL generation aims to translate natural language questions into executable database queries. Although large language models tend to show high potential for zero-shot and few-shot inference, they lack precision when generating SQL. Since text-to-SQL requires an exact match, meaning even a single misplaced identifier or incorrect operator can cause errors. Moreover, SQL is always grounded in a specific schema: the model must understand which columns exist, how they relate to the question, and how to assemble a logically consistent query.
+Text to SQL generation addresses the problem of converting natural language questions into executable database queries. While modern large language models exhibit strong general language understanding and can often produce SQL-like text in zero shot or few shot settings, they struggle with the precision required for reliable query generation. SQL is unforgiving to small mistakes. A single incorrect column name, misplaced operator, or missing clause can cause a query to fail or return an incorrect result. In addition, SQL queries are always grounded in a specific database schema. A model must correctly identify which columns are available, determine how they relate to the question being asked, and assemble a query that is both syntactically valid and semantically correct with respect to the underlying table.
 
-Fine-tuning the full weight matrices of an LLM for these behaviors requires significant computational resources. Parameter-efficient methods instead introduce small trainable modules into a frozen backbone. LoRA is among the most successful of these methods, projecting updates into low-dimensional subspaces and thereby reducing the number of trainable parameters by orders of magnitude. This project applies LoRA to Google's Gemma-3 4B pretrained model with the objective of adapting the model toward structured SQL generation behaviors without updating its billions of parameters.
+Adapting a large language model to meet these requirements poses a challenge. Fully fine tuning all model parameters is computationally expensive and often impractical outside of large scale training environments. Parameter efficient fine tuning methods offer an alternative by introducing a small number of trainable parameters into an otherwise frozen model. Low Rank Adaptation is one of the most effective of these techniques, allowing task specific updates to be learned through low dimensional projections while preserving the pretrained backbone. This approach dramatically reduces memory and compute requirements while still enabling meaningful behavioral adaptation. In this project, LoRA is applied to the Gemma 3 model with approximately four billion parameters in order to specialize it for structured SQL generation without modifying the full weight matrices.
 
-The project unfolds across three primary phases. First, a synthetic SQL dataset is used for supervised fine-tuning with LoRA, enabling the model to learn generic SQL patterning. Second, a standardized evaluation on WikiSQL is conducted using a custom SQLite execution pipeline. Third, model outputs are analyzed along semantic, syntactic, and execution dimensions. These phases jointly support the conclusion that LoRA-enabled fine-tuning can reliably transfer SQL generation capabilities from synthetic to real datasets.
+The project is organized around three tightly connected stages. The first stage focuses on data preparation and prompt construction using the WikiSQL dataset, transforming each example into a structured prompt and completion format that aligns with causal language modeling. The second stage involves fine tuning the Gemma model using LoRA adapters under a supervised training objective that encourages accurate SQL continuation while keeping the backbone frozen and quantized. The final stage evaluates both the baseline and fine tuned models under identical conditions using an execution based pipeline that measures syntactic validity, semantic correctness, and textual similarity. Together, these stages provide a complete end to end examination of how parameter efficient fine tuning can adapt a general purpose language model to the text to SQL task.
 
 ## Literature Review
 
@@ -72,11 +72,13 @@ This project relies exclusively on the WikiSQL dataset for both supervised fine-
 
 ### Dataset Characteristics
 
-WikiSQL is well-suited for studying foundational text-to-SQL behavior for three primary reasons. First, it features a simple but still realistic SQL grammar, where each query operates over exactly one table, includes at most a single aggregation operator, and consists of a conjunction of comparatively shallow filtering conditions. This design isolates the core translation problem—mapping natural language onto SQL relational operators—while avoiding confounds such as multi-table joins, nested subqueries, or complex predicate structure. Second, WikiSQL provides unusually high schema and task diversity: it contains over 24,000 unique tables, each with different column names, column orders, and data distributions. **NEED TO HUMANIZE**[Because every example is grounded in its own table, the model cannot rely on memorized column labels or SQL templates, and must instead learn generalizable alignment between linguistic references (e.g., “what is the population”) and arbitrary schema fields. This property makes WikiSQL a powerful testbed for evaluating schema-conditioned generalization in LLMs. Third, the dataset is mature, publicly validated, and widely adopted in the semantic parsing community. With more than 80,000 natural-language questions paired with structured SQL programs, WikiSQL offers a sufficiently large corpus for supervised fine-tuning, along with clear execution-based evaluation metrics that allow unambiguous correctness checking.
+WikiSQL is particularly well suited for studying foundational text-to-SQL behavior because its structure isolates the core challenge of translating natural language into relational queries without introducing unnecessary complexity. Each query operates over a single table and uses a limited set of operations, which keeps the focus on learning how questions map onto selections, filters, and simple aggregations. By excluding multi table joins and deeply nested logic, the dataset avoids confounding factors and makes it easier to attribute model errors to failures in schema understanding or language grounding rather than to advanced SQL mechanics.
 
-A critical aspect of WikiSQL, what allows for supervised fine tuning, is that each example includes not only a question and table schema, but also a canonical SQL program that expresses the correct or expected answer for each natural language question. This canonical program, often referred to as the gold query, serves as the ground-truth target during training and evaluation. The presence of these structured gold queries enables both supervised fine-tuning and execution-based evaluation where the predicted query generated by an LLM and the gold query can be run against the same table to verify whether they return equivalent answers. The inclusion of gold queries is one of the primary reasons WikiSQL remains such a widely used benchmark.
+At the same time, WikiSQL offers substantial diversity across schemas and tasks. The dataset contains tens of thousands of unique tables, each with different column names, orders, and value distributions. Because every question is tied to its own table, models cannot rely on memorized templates or familiar column patterns. Instead, they must learn how to interpret a question in the context of an arbitrary schema and determine which fields are relevant based solely on their names and structure. This forces the model to develop a more flexible form of schema alignment rather than exploiting superficial regularities. As a result, WikiSQL provides a strong setting for evaluating whether a model can generalize text to SQL behavior beyond previously seen tables.
 
-In keeping with best practices for machine learning, the training, validation, and test sets are partitioned such that there is no overlap of tables between them and each unique table occurs in only one split. This ensures that model evaluation reflects genuine generalization to unseen schemas, rather than memorization of patterns or data from previously observed tables.] A summary of the dataset sizes used in this project is shown below:
+Another defining feature of WikiSQL is the presence of a canonical SQL query for every natural language question. Each example includes a reference query that represents the correct interpretation of the question with respect to the table. These reference queries serve as the ground truth signal for supervised fine tuning and make it possible to evaluate predictions through direct execution. Both the model generated query and the reference query can be run against the same table to determine whether they return identical results, providing an unambiguous measure of semantic correctness. This combination of paired questions, schemas, and executable reference queries is a key reason the dataset remains widely used in research.
+
+The dataset is also carefully partitioned to support meaningful evaluation. Tables are split across training, validation, and test sets so that no table appears in more than one split. This design prevents models from memorizing schema specific patterns and ensures that performance on the test set reflects genuine generalization to unseen tables. Together, these properties make WikiSQL a well controlled and effective benchmark for studying how language models learn to generate SQL from natural language. A summary of the dataset sizes used in this project is shown below:
 
 | Split | Rows | Used For |
 |-------|--------|-----------------------------|
@@ -95,40 +97,67 @@ These counts correspond to the examples that remained after filtering malformed 
 
 **Example WikiSQL Data Item**
 
-::: {style="font-size: 85%;"}
-```text
-Question: Tell me what the notes are for South Australia
+QUESTION:
 
-Table Headers:
+::: {style="font-size: 100%; text-align: center;"}
+```text
+Tell me what the notes are for South Australia
+```
+:::
+
+TABLE HEADERS:
+
+::: {style="font-size: 100%; text-align: center;"}
+```text
 - State/territory
 - Text/background colour
 - Format
 - Current slogan
 - Current series
 - Notes
+```
+:::
 
-Example Rows:
-| State/territory             | Text/background colour | Format      | Current slogan                       | Current series | Notes                                 |
-|-----------------------------|-----------------------|-------------|--------------------------------------|---------------|---------------------------------------|
-| Australian Capital Territory| blue/white            | Yaa·nna     | ACT · CELEBRATION OF A CENTURY 2013  | YIL·00A       | Slogan screenprinted on plate         |
-| New South Wales             | black/yellow          | aa·nn·aa    | NEW SOUTH WALES                      | BX·99·HI      | No slogan on current series           |
-| New South Wales             | black/white           | aaa·nna     | NSW                                  | CPX·12A       | Optional white slimline series        |
-| Northern Territory          | ochre/white           | Ca·nn·aa    | NT · OUTBACK AUSTRALIA               | CB·06·ZZ      | New series began in June 2011         |
-| Queensland                  | maroon/white          | nnn·aaa     | QUEENSLAND · SUNSHINE STATE          | 999·TLG       | Slogan embossed on plate              |
-| South Australia             | black/white           | Snnn·aaa    | SOUTH AUSTRALIA                      | S000·AZD      | No slogan on current series           |
-| Victoria                    | blue/white            | aaa·nnn     | VICTORIA - THE PLACE TO BE           | ZZZ·562       | Current series will be exhausted this year |
+EXAMPLE ROWS:
 
-Logical SQL:
+::: {style="font-size: 80%; text-align: center;"}
+```text
+| State/territory             | Text/background colour | Format      | Current slogan                       | Current series | Notes                                      |
+|-----------------------------|------------------------|-------------|--------------------------------------|----------------|--------------------------------------------|
+| Australian Capital Territory| blue/white             | Yaa·nna     | ACT · CELEBRATION OF A CENTURY 2013  | YIL·00A        | Slogan screenprinted on plate              |
+| New South Wales             | black/yellow           | aa·nn·aa    | NEW SOUTH WALES                      | BX·99·HI       | No slogan on current series                |
+| New South Wales             | black/white            | aaa·nna     | NSW                                  | CPX·12A        | Optional white slimline series             |
+| Northern Territory          | ochre/white            | Ca·nn·aa    | NT · OUTBACK AUSTRALIA               | CB·06·ZZ       | New series began in June 2011              |
+| Queensland                  | maroon/white           | nnn·aaa     | QUEENSLAND · SUNSHINE STATE          | 999·TLG        | Slogan embossed on plate                   |
+| South Australia             | black/white            | Snnn·aaa    | SOUTH AUSTRALIA                      | S000·AZD       | No slogan on current series                |
+| Victoria                    | blue/white             | aaa·nnn     | VICTORIA - THE PLACE TO BE           | ZZZ·562        | Current series will be exhausted this year |
+```
+:::
+
+LOGICAL SQL:
+
+::: {style="font-size: 100%; text-align: center;"}
+```text
   sel  = 5
   agg  = 0
   conds = [[3, 0, "SOUTH AUSTRALIA"]]
+```
+:::
 
-Executable SQL:
+EXECUTABLE SQL:
+
+::: {style="font-size: 100%; text-align: center;"}
+```text
   SELECT "Notes"
   FROM data
   WHERE "Current slogan" = 'SOUTH AUSTRALIA'
 ```
 :::
+
+<figcaption style="text-align: center; font-style: italic; margin-top: 0.5em;">
+Example 1. WikiSQL Illustration – Table preview, schema, question, and corresponding executable SQL
+</figcaption>
+
 
 ### Preprocessing and Prompt Construction
 
@@ -142,7 +171,7 @@ The schema is serialized into the following uniform text structure:
 
 PROMPT FIELD:
 
-::: {style="font-size: 85%;"}
+::: {style="font-size: 100%; text-align: center;"}
 ```
 <INSTRUCTIONS>
 You are a precise text-to-SQL generator. Using the known schema of the sql 
@@ -168,13 +197,18 @@ Tell me what the notes are for South Australia
 
 COMPLETION FIELD:
 
-::: {style="font-size: 85%;"}
+::: {style="font-size: 100%; text-align: center;"}
 ```
 SELECT "Notes" FROM data 
 WHERE "Current slogan" = 'SOUTH AUSTRALIA'
 </SQL_Query>
 ```
 :::
+
+<figcaption>
+Example 2. Prompt and completion structure for text-to-SQL training – prompt with explicit instruction, schema, and question fields (top); model completion containing only executable SQL (bottom). This format mirrors real-world inference and enforces strict input–output separation, ensuring the model learns to generate SQL solely from the provided schema and question.
+</figcaption>
+
 
 ### SQLite Reconstruction and Executable SQL
 
@@ -215,25 +249,30 @@ At a high level, Gemma-3 4B consists of 34 transformer blocks, each operating ov
 
 A summary of the most relevant architectural hyperparameters is presented below:
 
+<div align="center">
+
+**Table 1. Gemma-3 Architecture Hyperparameters**
+
 | **Feature**                    | **Value / Description**                                             |
 |--------------------------------|---------------------------------------------------------------------|
 | Total Trainable Parameters     | 1,342,504,960 (~23%)                                               |
 | Total Non-trainable Parameters | 5,708,161,392                                                      |
-| Number of Layers               | 34 Transformer blocks                                               |
+| Number of Layers               | 34 Transformer blocks                                              |
 | Hidden Size                    | 2560                                                               |
-| Attention Heads                | 8 (4 key/value heads)                                               |
+| Attention Heads                | 8 (4 key/value heads)                                              |
 | MLP Intermediate Size          | 10,240                                                             |
 | Activation Function            | GELU-Tanh                                                          |
 | Vocabulary Size                | 262,208 tokens                                                     |
 | Positional Encoding            | RoPE with linear scaling (×8), effective context window: 131k tokens|
 | Attention Type                 | Sliding-window (1024 tokens) + global full attention every 6 blocks |
 
+</div>
 
 \
 
-Each transformer block in Gemma-3 follows the established pattern of **attention → feed-forward → residual connection**, but with careful engineering to improve numerical stability and training efficiency:
+Each transformer block in Gemma-3 follows the established pattern of attention → feed-forward → residual connection, but with careful engineering to improve numerical stability and training efficiency:
 
-1. **Multi-Head Self-Attention (MHSA).**  
+1. Multi-Head Self-Attention (MHSA).
    The model computes learned projections for queries, keys, and values using matrices $W_Q$, $W_K$, and $W_V$. These are grouped into multiple heads, which allows the model to attend to different types of dependencies in parallel. Attention is computed via the scaled dot-product formulation:
 
    $$
@@ -242,7 +281,7 @@ Each transformer block in Gemma-3 follows the established pattern of **attention
 
    The outputs of all heads are concatenated and passed through an output projection $W_O$ before being added to the residual pathway.
 
-2. **Feed-Forward Network (FFN).**  
+2. Feed-Forward Network (FFN).
    Following attention, each block applies a feed-forward MLP of the form
 
    $$
@@ -251,7 +290,7 @@ Each transformer block in Gemma-3 follows the established pattern of **attention
 
    where $f$ is a smooth nonlinearity such as SiLU. The upward projection expands the dimensionality, allowing for richer intermediate representations, while the downward projection compresses the result back to the hidden dimension.
 
-3. **Normalization and Residual Structure.**  
+3. Normalization and Residual Structure.
    Each sublayer includes normalization layers to regulate activation magnitudes and improve gradient flow. The residual pathways serve as shortcuts that mitigate vanishing-gradient issues and stabilize both pretraining and fine-tuning.
 
 ### Low-Rank Adaptation (LoRA) Configuration
@@ -292,153 +331,428 @@ This configuration directs LoRA to focus its adaptation capacity on the projecti
 
 ### Training Plan
 
-The goal of the training pipeline is to adapt the Gemma 3 model, with roughly four billion parameters, to the text-to-SQL task using LoRA adapters while keeping the pretrained backbone frozen and quantized. The method follows a causal language modeling objective, which means that the model is trained to predict the next token in a sequence that contains both the prompt and the gold SQL completion. **Because SQL prediction in deployment is also a continuation-based process, the training objective and inference behavior remain aligned, reducing the risk of format drift and encouraging the model to internalize SQL generation as a structured next-token prediction problem. Only the LoRA parameters are updated during training while the transformer backbone stays fixed in 4-bit NF4 precision.** This separation provides a stable optimization surface and keeps the computational and memory demands well within the limits of a single GPU environment.
+The goal of the training pipeline is to adapt the Gemma 3 model, with roughly four billion parameters, to the text-to-SQL task using LoRA adapters while keeping the pretrained backbone frozen and quantized. The method follows a causal language modeling objective, which means that the model is trained to predict the next token in a sequence that contains both the prompt and the gold SQL completion. Because SQL prediction in deployment is also a continuation-based process, the training objective and inference behavior remain aligned, reducing the risk of format drift and encouraging the model to internalize SQL generation as a structured next-token prediction problem. Only the LoRA parameters are updated during training while the transformer backbone stays fixed in 4-bit NF4 precision. This separation provides a stable optimization surface and keeps the computational and memory demands well within the limits of a single GPU environment.
 
-The WikiSQL dataset, once preprocessed, is fed into the model as a series of prompt–completion pairs. Each prompt contains an instruction block, a serialized table schema, and the user question, all wrapped in explicit XML-like tags that allow the tokenizer and model to reliably partition the semantic components of each example. The completion field then contains the corresponding SQL query ending with a closing tag.**These examples are loaded into Hugging Face Datasets objects, which provide efficient memory mapping and automatic integration with the tokenization pipeline. During training, the SFTTrainer prepares each example by concatenating the prompt and SQL completion into a single sequence that reflects the exact text the model will see during inference. The tokenizer then applies Gemma’s byte-pair encoding rules to convert text into token IDs, and the trainer assembles these token sequences into batches. Because packing=True is enabled, multiple short examples are combined into the same 512-token window, reducing padding waste and ensuring that GPU memory is used efficiently.**
+The WikiSQL dataset, once preprocessed, is fed into the model as a series of prompt–completion pairs. Each prompt contains an instruction block, a serialized table schema, and the user question, all wrapped in explicit XML-like tags that allow the tokenizer and model to reliably partition the semantic components of each example. The completion field then contains the corresponding SQL query ending with a closing tag. These examples are loaded into Hugging Face Datasets objects, which provide efficient memory mapping and automatic integration with the tokenization pipeline. During training, the SFTTrainer prepares each example by concatenating the prompt and SQL completion into a single sequence that reflects the exact text the model will see during inference. The tokenizer then applies Gemma’s byte-pair encoding rules to convert text into token IDs, and the trainer assembles these token sequences into batches. Because packing=True is enabled, multiple short examples are combined into the same 512-token window, reducing padding waste and ensuring that GPU memory is used efficiently.
 
 Once tokenized, each sequence is copied into a parallel label sequence that is shifted by one position. This means that for token position t, the model attempts to predict token t+1. The resulting cross-entropy loss is computed only over the completion region of each sequence, so the model is not penalized for regenerating instructions or schema information. This selective masking ensures that the optimization pressure focuses on SQL formation rather than reproducing prompt structure. The causal objective therefore becomes a direct mechanism for teaching the model how to form valid SQL: each incorrect token prediction increases the loss, and the LoRA adapters update in a direction that improves the syntactic and semantic correctness of future predictions.
 
-The mechanics of loss reduction follow the standard structure of a decoder-only transformer. For every token position, Gemma produces a probability distribution over the entire vocabulary. The training signal compares this distribution to the true next token through a cross-entropy objective. When the predicted distribution assigns too little mass to the correct SQL token, the associated gradient flows backward through the LoRA adapter matrices and updates them to improve future predictions. The frozen 4-bit backbone never changes, but it continues to supply rich contextual and semantic embeddings. **The LoRA matrices essentially “bend” these pretrained features toward SQL behavior without disturbing the foundational linguistic knowledge encoded in Gemma. Gradient accumulation is employed to expand the effective batch size: although the nominal batch size per device is one, gradients from four successive forward–backward passes are aggregated before the optimizer performs a weight update.** This method stabilizes training while avoiding memory overflows.
+The mechanics of loss reduction follow the standard structure of a decoder-only transformer. For every token position, Gemma produces a probability distribution over the entire vocabulary. The training signal compares this distribution to the true next token through a cross-entropy objective. When the predicted distribution assigns too little mass to the correct SQL token, the associated gradient flows backward through the LoRA adapter matrices and updates them to improve future predictions. The frozen 4-bit backbone never changes, but it continues to supply rich contextual and semantic embeddings. The LoRA matrices essentially bend these pretrained features toward SQL behavior without disturbing the foundational linguistic knowledge encoded in Gemma. Gradient accumulation is employed to expand the effective batch size: although the nominal batch size per device is one, gradients from four successive forward–backward passes are aggregated before the optimizer performs a weight update. This method stabilizes training while avoiding memory overflows.
 
-The training configuration defined through SFTConfig governs all aspects of optimization and resource management. The 512-token sequence length reflects the short nature of WikiSQL examples and avoids unnecessary cost. Packed sequences improve throughput, which is particularly important for quantized models whose performance often depends on efficient batching. Three epochs provide adequate exposure to the training distribution without encouraging memorization of table-specific patterns, especially because WikiSQL partitions tables across splits to prevent leakage. The learning rate is intentionally conservative, following QLoRA recommendations, because adapter tuning on a quantized backbone can become unstable at higher rates. A warmup period ensures that the optimizer does not immediately apply large updates, which helps prevent divergence in the early stages of training. Mixed precision, either FP16 or BF16 depending on hardware capabilities, reduces memory usage and speeds up computation. The use of gradient checkpointing further lowers memory pressure by recomputing intermediate activations during the backward pass. The constant learning rate scheduler maintains a steady optimization environment once warmup is complete. Each of these settings contributes to an efficient and stable fine-tuning procedure suitable for limited hardware.
+The training configuration, defined through SFTConfig, governs all aspects of optimization and resource management. The 512-token sequence length reflects the short nature of WikiSQL examples and avoids unnecessary cost. Packed sequences improve throughput, which is particularly important for quantized models whose performance often depends on efficient batching. Three epochs provide adequate exposure to the training distribution without encouraging memorization of table-specific patterns, especially because WikiSQL partitions tables across splits to prevent leakage. The learning rate is intentionally conservative, following QLoRA recommendations, because adapter tuning on a quantized backbone can become unstable at higher rates. A warmup period ensures that the optimizer does not immediately apply large updates, which helps prevent divergence in the early stages of training. Mixed precision, either FP16 or BF16 depending on hardware capabilities, reduces memory usage and speeds up computation. The use of gradient checkpointing further lowers memory pressure by recomputing intermediate activations during the backward pass. The constant learning rate scheduler maintains a steady optimization environment once warmup is complete. Each of these settings contributes to an efficient and stable fine-tuning procedure suitable for limited hardware.
 
 During training, the SFTTrainer logs several metrics that provide insight into learning dynamics. The primary signal is the training loss, which shows how effectively the model is predicting SQL tokens as training progresses. Additional logs include the active learning rate, the number of tokens processed per second, and internal trainer statistics. 
 
-The training pipeline relies on an integrated stack of Python libraries. Hugging Face Transformers provides the Gemma architecture along with quantization hooks that allow NF4 loading through BitsAndBytes. **The TRL library supplies the SFTTrainer, which automates dataset packing, label masking, forward passes, and loss computation for causal LM objectives. The PEFT library manages LoRA initialization, weight injection, and adapter merging. Hugging Face Datasets provides the backbone for efficient preprocessing and dataset streaming. SQLite and Pandas support evaluation, enabling real SQL execution through a lightweight, in-memory database. TensorBoard records scalar metrics that allow visual inspection of the loss curves throughout training. This entire stack is orchestrated inside a Google Colab environment, with persistent storage managed through Google Drive and experiment metadata captured through timestamped directories.**
+The training pipeline relies on an integrated stack of Python libraries. Hugging Face Transformers provides the Gemma architecture along with quantization hooks that allow NF4 loading through BitsAndBytes. The TRL library supplies the SFTTrainer, which automates dataset packing, label masking, forward passes, and loss computation for causal LM objectives. The PEFT library manages LoRA initialization, weight injection, and adapter merging. Hugging Face Datasets provides the backbone for efficient preprocessing and dataset streaming. SQLite and Pandas support evaluation, enabling real SQL execution through a lightweight, in-memory database. TensorBoard records scalar metrics that allow visual inspection of the loss curves throughout training. This entire stack is orchestrated inside a Google Colab environment, with persistent storage managed through Google Drive and experiment metadata captured through timestamped directories.
 
-**From end to end, training proceeds through a clear sequence of steps. WikiSQL examples are loaded, validated, and converted into prompt–completion structures. These examples are tokenized, packed, and fed into the model during supervised tuning. The Gemma backbone remains fixed while LoRA adapters gradually learn task-specific behavior. The trainer monitors loss and writes checkpoints at the end of each epoch. After fine-tuning is complete, the adapter weights and tokenizer are saved, and the model is evaluated through SQL execution on reconstructed SQLite tables.**
+From end to end, training proceeds through a clear sequence of steps. WikiSQL examples are loaded, validated, and converted into prompt–completion structures. These examples are tokenized, packed, and fed into the model during supervised tuning. The Gemma backbone remains fixed while LoRA adapters gradually learn task-specific behavior. The trainer monitors loss and writes checkpoints at the end of each epoch. After fine-tuning is complete, the adapter weights and tokenizer are saved, and the model is evaluated through SQL execution on reconstructed SQLite tables.
 
 ### Text to SQL Experimental Setup
 
 The evaluation procedure is designed to compare two models under identical conditions. The first model is the unmodified Gemma 3 4B pretrained checkpoint, which serves as the baseline. The second is the fine-tuned LoRA-augmented Gemma 3 4B model produced by the training pipeline described earlier. Both models are evaluated using the same prompt generation process, the same SQL cleaning and extraction logic, and the same SQLite execution environment. This design ensures that measured performance differences derive from learned SQL generation behavior rather than from changes in preprocessing or evaluation tooling.
 
-**Evaluation begins by converting each WikiSQL test example into the same structured prompt format used during supervised training. The prompt consists of an instruction block, a serialized representation of the table schema, and the natural-language question. These components are wrapped in explicit XML-like tags, which allow the model to identify the point where SQL generation begins. The model receives no information about table rows during inference; it must infer the correct aggregation, selection, and filtering operations entirely from the schema and question. The prompt is then fed into the model, which generates a continuation consisting of a predicted SQL query.** The query is extracted and cleaned through a standardized parsing step that identifies the first valid SQL-like region inside the <SQL_Query> block and removes any trailing explanation or stray text the model may have produced. This procedure, applied uniformly to both models, isolates the predicted SQL in a consistent and deterministic manner.
+Evaluation begins by converting each WikiSQL test example into the same structured prompt format used during supervised training. The prompt consists of an instruction block, a serialized representation of the table schema, and the natural-language question. These components are wrapped in explicit XML-like tags, which allow the model to identify the point where SQL generation begins. The model receives no information about table rows during inference; it must infer the correct aggregation, selection, and filtering operations entirely from the schema and question. The prompt is then fed into the model, which generates a continuation consisting of a predicted SQL query. The query is extracted and cleaned through a standardized parsing step that identifies the first valid SQL-like region inside the `<SQL_Query>` block and removes any trailing explanation or stray text the model may have produced. This procedure, applied uniformly to both models, isolates the predicted SQL in a consistent and deterministic manner.
 
 The predicted SQL is evaluated in several ways. First, the query is executed against a reconstructed SQLite database created from the table rows provided in the WikiSQL test set. Because each table in WikiSQL includes fully specified column names and row data, it is straightforward to materialize a corresponding SQLite table inside an in-memory database and then execute both the gold query and the predicted query within that environment. Execution results are compared directly. If the predicted SQL runs without a syntax error and returns the same result rows as the gold query, it is marked as correct. If the query is executable but returns an incorrect result set, it is counted as a wrong-result case. If the SQL engine raises a syntax or runtime error, the prediction is categorized as invalid. This execution-based evaluation is the most stringent test available because it verifies both syntactic correctness and semantic alignment with the true relational operation described in the question.
 
 Beyond execution correctness, the system performs a suite of similarity measurements. These include Jaccard token similarity, normalized Levenshtein similarity, and structural alignment metrics that compare selected columns, referenced columns in the WHERE clause, and operator usage. These structural scores are important because SQL queries can differ superficially while still expressing the same computation, and in other cases, they can appear similar while differing in a subtle but meaningful way. Text-based metrics such as BLEU and ROUGE are computed as well, along with exact-match comparisons and token-level F1 scores. The combination of execution and similarity metrics provides a multidimensional picture of the model’s predictive behavior and helps identify whether errors arise from structural misunderstandings, lexical drift, or outright semantic failures.
 
-Inference with Gemma 3 4B is not instantaneous. **Each query requires prompt construction, tokenization, autoregressive generation, SQL cleaning, schema materialization, and SQLite execution. The average end-to-end time for a single evaluation example is approximately fifteen seconds in the Colab environment used for this project. Running the full WikiSQL test set, which contains over fifteen thousand examples, would therefore require several hours of continuous inference, far exceeding the time available under practical constraints. To address this constraint while preserving statistical integrity, the evaluation operates on a random ten percent sample of the full test set. A reproducible random seed selects this subsample, allowing the experiment to run within an acceptable time window while maintaining representative coverage of the underlying data distribution. Each sampled example goes through the full evaluation sequence, and the aggregated results constitute the reported performance metrics for both the baseline and trained models.**
+Inference with Gemma 3 4B is not instantaneous. Each query requires prompt construction, tokenization, autoregressive generation, SQL cleaning, schema materialization, and SQLite execution. The average end-to-end time for a single evaluation example is approximately fifteen seconds in the Colab environment used for this project. Running the full WikiSQL test set, which contains over fifteen thousand examples, would therefore require several hours of continuous inference, far exceeding the time available under practical constraints. To address this constraint while preserving statistical integrity, the evaluation operates on a random ten percent sample of the full test set. A reproducible random seed selects this subsample, allowing the experiment to run within an acceptable time window while maintaining representative coverage of the underlying data distribution. Each sampled example goes through the full evaluation sequence, and the aggregated results constitute the reported performance metrics for both the baseline and trained models.
 
-**The final evaluation step involves computing summary statistics over all predicted queries. These summaries include the proportion of syntactically valid SQL queries, the proportion that execute correctly, averaged similarity metrics, and aggregate BLEU, ROUGE, EM, and F1 values. Row-level logs are saved in JSONL format, preserving each question, predicted SQL, gold SQL, execution result, and error type, while a separate summary file records the global metrics that form the basis of the quantitative results in the report. All evaluations are performed twice, once for the baseline model and once for the LoRA-fine-tuned model, enabling a direct and controlled comparison of the effect of LoRA adaptation on SQL generation behavior.**
+The final evaluation step involves computing summary statistics over all predicted queries. These summaries include the proportion of syntactically valid SQL queries, the proportion that execute correctly, averaged similarity metrics, and aggregate BLEU, ROUGE, EM, and F1 values. Row-level logs are saved in JSONL format, preserving each question, predicted SQL, gold SQL, execution result, and error type, while a separate summary file records the global metrics that form the basis of the quantitative results in the report. All evaluations are performed twice, once for the baseline model and once for the LoRA-fine-tuned model, enabling a direct and controlled comparison of the effect of LoRA adaptation on SQL generation behavior.
 
 ## Results
 
+This section presents the empirical results of training and evaluating the LoRA-fine-tuned Gemma 3 model on the WikiSQL task. Results are organized to first establish training stability, then compare baseline and fine-tuned models under identical evaluation conditions. All reported metrics are computed on the same randomly sampled ten percent of the WikiSQL test set using identical prompt construction, SQL extraction, and SQLite execution logic.
+
 ### Training Results
 
-<figure style="text-align: center;">
-  <img src="./results/Rank_32_Alpha_16_Plots/token_accuracy.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 1:</figcaption>
-</figure>
+Figure 1 reports mean token-level accuracy over training steps for the LoRA-fine-tuned Gemma model. Token accuracy rises sharply during the initial phase of training and stabilizes near the end, indicating that the adapter parameters rapidly learn the structure of SQL generation while converging to a stable solution. Occasional downward spikes appear throughout training, which are consistent with the presence of more difficult batches containing longer or structurally diverse queries. Importantly, the model recovers quickly after these drops, suggesting that optimization remains well behaved and that no catastrophic instability is introduced by adapter training.
 
-As we can see from Fig. 1, this plot measures the mean token-level accuracy during training for the LoRA-fine-tuned Gemma model. In the early training steps, the token accuracy increases rapidly and stabilizes near the end, which means that the model can converge quickly and effectively adapt to SQL generation. Also, we can see there are occasional sharp drops from time to time. Which likely correspond to more challenging training batches, but accuracy recovers quickly, indicating that the optimization process remains stable throughout training. Since this metric is calculated from training data, it primarily reflects learning dynamics rather than generalization performance.
-
-<figure style="text-align: center;">
-  <img src="./results/Rank_32_Alpha_16_Plots/training_grad_norm.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 2:</figcaption>
-</figure>
-
-As we can see from Fig. 2, this plot shows the gradient norm over training steps for the LoRA-fine-tuned Gemma model. In the early training steps, the gradient norm is high and fluctuates significantly, indicating that the parameters are updated frequently during the model learning process. Over time, the gradient norm decreases and stabilizes, indicating that the model is converging. Also, occasional spikes appear due to more challenging training batches. However, training remains stable and does not suffer from gradient explosion.
-
-<figure style="text-align: center;">
-  <img src="./results/Rank_32_Alpha_16_Plots/training_loss.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 3:</figcaption>
-</figure>
-
-As we can see from Fig. 3, this plot measures the training loss over training steps for the LoRA-fine-tuned Gemma model. In the early training steps, the training loss decreases sharply, which means the model learns and adapts quickly from data. As the training continues, the decrease in training loss starts to drop slowly and stabilizes at a low value, indicating convergence. Also, from the loss curve, we can see there is a consistent downward trend despite noise in the raw loss, which means the training is stable and effective.
-
-### Text to SQL Evaluation Results
-
-#### Baseline
-
-We evaluate the performance of the baseline Gemma model without LoRA fine-tuning, which serves as a reference for comparison with the Trained LoRA Model in the following section.
-
-<figure style="text-align: center;">
-  <img src="./results/Baseline_Plots/error_breakdown_baseline.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 4:</figcaption>
-</figure>
-
-As we can see from Fig. 4, this plot shows the SQL prediction error breakdown for the baseline Gemma model without LoRA fine-tuning. All predictions fall into the SQL Error section, meaning the SQL model output either has a syntax error or results in an execution failure. This plot highlights the difficulty of the text-to-SQL task for a general-purpose language model. it can be used as a comparison later when we add LoRA fine-tuning.
-
-<figure style="text-align: center;">
-  <img src="./results/Baseline_Plots/nlp_text_metrics_baseline.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 5:</figcaption>
-</figure>
-
-As we can see from Fig. 5, this plot shows text-based evaluation metrics for the baseline Gemma model without LoRA fine-tuning. We can see the BLEU measures the likeless of generated SQL text is to the gold SQL based on overlapping word sequences. A 12.594 BLEU score means there are only limited text similarity to the correct SQL wording. Also, a 0.670 ROUGE-L score means the structure of generated queries only matches about 67% of the gold queries. Moreover, the there are no generated queries exactly match the gold SQL. Last, for the Token F1 score of 0.693, meaning there are about 69.3% of the individual SQL tokens are correct, even though the full query is wrong.
-
-<figure style="text-align: center;">
-  <img src="./results/Baseline_Plots/similarity_distributions_baseline.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 6:</figcaption>
-</figure>
-
-As we can see from Fig. 6, this plot shows the distributions of Jaccard and normalized Levenshtein similarity between gold SQL queries and those generated by the baseline Gemma model. The Jaccard similarity plot measures the degree of overlap between SQL tokens. In contrast, the Levenshtein similarity measures the number of edits needed to convert a predicted SQL into a golden SQL. The plots indicate that the baseline-generated SQL queries and actual queries share some similar structure and labels, but do not guarantee correctness.
-
-<figure style="text-align: center;">
-  <img src="./results/Baseline_Plots/similarity_vs_correctness_baseline.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 7:</figcaption>
-</figure>
-
-As we can see from Fig. 7, this plot shows the relationship between similarity metrics and SQL execution correctness for the baseline Gemma model. The points indicate incorrect executions, meaning that even when similarity scores are high, the baseline model still produces incorrect SQL executions, highlighting the limitations of similarity-based metrics alone.
-
-#### Trained LoRA Model (Rank 32, Alpha 16)
-
-We evaluate the performance of the trained LoRA model (rank 32, alpha 16) to assess how task-specific fine-tuning improves text-to-SQL generation compared with the baseline Gemma model.
-
-<figure style="text-align: center;">
-  <img src="./results/Rank_32_Alpha_16_Plots/error_breakdown.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 8:</figcaption>
-</figure>
-
-As we can see from Fig. 8, this plot shows the SQL prediction error breakdown for the trained LoRA Model. About 47.20% of the predictions have incorrect results; they have valid SQL but incorrect outputs. About 52.17% of the predictions have the correct output, matching the gold result. Only about 0.63% of the predictions fall into the SQL Error section. Compared with the baseline model, which produces only SQL errors, the LoRA-fine-tuned model shows a substantial improvement in generating executable and correct SQL queries.
-
-<figure style="text-align: center;">
-  <img src="./results/Rank_32_Alpha_16_Plots/nlp_text_metrics.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 9:</figcaption>
-</figure>
-
-As we can see from Fig. 9, this plot shows text-based evaluation metrics for the trained LoRA Model. A 95.230 BLEU score means there is a high similarity to the correct SQL wording. Also, a 0.971 ROUGE-L score means the structure of generated queries matches about 97.1% of the gold queries. Moreover, about 76.3% of generated queries exactly match the gold SQL. Lastly, the Token F1 score of 0.986 indicates that about 98.6% of the individual SQL tokens are correct, even though the full query is incorrect. Compared with the baseline model, these results demonstrate a substantial improvement in both SQL correctness and overall text similarity after LoRA fine-tuning.
-
-<figure style="text-align: center;">
-  <img src="./results/Rank_32_Alpha_16_Plots/similarity_distributions.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 10:</figcaption>
-</figure>
-
-As we can see from Fig. 9, this plot shows the distributions of Jaccard and normalized Levenshtein similarity between gold SQL queries and those generated by the trained LoRA Model. The similarity distributions are tightly concentrated around 1.0, indicating that, after fine-tuning, the SQL queries generated closely match the gold queries in both tokens and structure. Compared with the baseline model, the trained LoRA model shows a much stronger concentration of similarity scores.
+Figure 2 shows the gradient norm over training steps. Early training is characterized by higher and more variable gradient magnitudes, reflecting the initial adaptation of LoRA parameters to the SQL task. As training progresses, the gradient norm decreases and stabilizes, indicating convergence and diminishing parameter updates. The absence of sustained growth or runaway spikes confirms that training does not suffer from gradient explosion despite operating on a quantized backbone.
 
 
-<figure style="text-align: center;">
-  <img src="./results/Rank_32_Alpha_16_Plots/similarity_vs_correctness.png"
-       width="80%"
-       style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 11:</figcaption>
-</figure>
+<div style="
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: stretch;
+  gap: 2em;
+">
 
-As we can see from Fig. 7, this plot shows the relationship between similarity metrics and SQL execution correctness for the trained LoRA Model. We can see from the points indicating incorrect executions that correct SQL queries start to appear, clustered around high Jaccard and Levenshtein values. This means these queries have strong token overlap and a similar structure to the gold SQL. Also, the number of incorrect SQL queries decreased significantly. Compared with the baseline model, the trained LoRA model shows a clear relationship between similarity scores and SQL execution correctness.
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Rank_32_Alpha_16_Plots/token_accuracy.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0,0,0,0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 1:</figcaption>
+  </figure>
 
-#### Example Prompt Comparison
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Rank_32_Alpha_16_Plots/training_grad_norm.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0,0,0,0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 2:</figcaption>
+  </figure>
 
-**Table Preview (first rows)**
+</div>
+
+Finally, and most importantly for the training cycle, Figure 3 displays the training loss curve. Loss decreases rapidly at the beginning of training, followed by a slower but consistent downward trend as the model refines its predictions. The overall shape of the curve indicates effective learning with no signs of divergence. Together, these three plots demonstrate that LoRA fine-tuning is stable, efficient, and well suited to adapting Gemma for structured SQL generation.
+
+<div style="
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: stretch;
+  gap: 2em;
+">
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Rank_32_Alpha_16_Plots/training_loss.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0,0,0,0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 3:</figcaption>
+  </figure>
+</div>
+
+### Text to SQL Execution Evaluation
+
+Execution accuracy is the most demanding evaluation criterion in text-to-SQL tasks because it simultaneously tests syntactic correctness and semantic alignment with the underlying database. A query must not only conform to valid SQL syntax but must also encode the correct relational logic so that, when executed, it returns the same result as the reference query. For this reason, execution-based evaluation provides a stronger signal than surface-level similarity metrics and serves as the primary indicator of whether a model can be deployed in a real database setting.
+
+Figure 4 presents the SQL prediction error breakdown for the baseline Gemma model without LoRA adaptation. All evaluated predictions fall into the SQL error category, meaning that none of the generated queries execute successfully against the reconstructed SQLite tables. In practice, these failures arise from a combination of malformed SQL syntax, invalid column references, incorrect quoting, and structurally incomplete queries. This outcome underscores a central challenge in text-to-SQL generation. Although large pretrained language models possess strong general linguistic capabilities, they do not reliably internalize the rigid structural constraints required for executable SQL without explicit task-specific supervision. The baseline results therefore establish a clear lower bound and motivate the need for targeted adaptation.
+
+Figure 5 shows the corresponding execution error breakdown for the LoRA-fine-tuned Gemma model. In sharp contrast to the baseline, more than half of the generated queries now execute correctly and return results that exactly match the gold query output. A substantial fraction of the remaining predictions produce syntactically valid SQL that executes successfully but yields an incorrect result set. These cases typically reflect partial semantic mismatches such as selecting the wrong column, applying an incorrect filter condition, or omitting a required aggregation. Importantly, only a very small proportion of predictions result in execution failures due to syntax or runtime errors.
+
+<div style="
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: stretch;
+  gap: 2em;
+">
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Baseline_Plots/error_breakdown_baseline.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0,0,0,0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 4:</figcaption>
+  </figure>
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Rank_32_Alpha_16_Plots/error_breakdown.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0,0,0,0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 5:</figcaption>
+  </figure>
+
+</div>
+
+This shift in the error distribution is significant for several reasons. First, it demonstrates that LoRA fine-tuning is sufficient to teach a large pretrained model the structural rules of SQL, even when the backbone parameters remain frozen and quantized. The dramatic reduction in execution errors indicates that the model has learned to consistently produce well-formed SQL statements that respect schema constraints. Second, the presence of a sizable valid-but-wrong category suggests that the remaining errors are primarily semantic rather than syntactic. This distinction is important because semantic errors are generally easier to address through additional training data, improved schema encoding, or more refined prompt design, whereas syntactic failures often indicate a more fundamental inability to represent the target language. Finally, the emergence of a majority correct category confirms that the fine-tuned model has crossed a qualitative threshold from non-functional to operational, achieving a level of reliability that supports meaningful downstream evaluation and comparison.
+
+Taken together, the execution results provide strong evidence that parameter-efficient fine-tuning fundamentally alters the behavior of the model. LoRA adaptation transforms the baseline Gemma model from a system that consistently fails to generate executable SQL into one that can reliably translate natural-language questions into correct database queries, all while maintaining a modest computational footprint.
+
+### Text to SQL Text Based Metrics
+
+Text-based evaluation metrics quantify how closely a generated SQL query matches the reference SQL at the sequence and token level, without requiring execution against a database. These metrics capture complementary aspects of similarity. BLEU measures n-gram overlap and emphasizes local token ordering. ROUGE-L measures longest common subsequence overlap and reflects global structural alignment. Exact match reports the proportion of predictions that are identical to the gold SQL after normalization. Token-level F1 measures overlap in individual SQL tokens and is less sensitive to ordering or minor syntactic differences. Together, these metrics provide a detailed view of how well the model reproduces the surface form and structure of SQL queries.
+
+Figure 8 reports these metrics for the baseline Gemma 3 model without LoRA adaptation. The baseline achieves moderate token-level F1, indicating that it often generates correct SQL tokens such as column names, aggregation functions, or operators. However, exact match accuracy is zero, and BLEU remains low. This gap reveals that while the baseline model recognizes SQL-relevant vocabulary, it fails to consistently arrange these tokens into complete and correct queries. ROUGE-L further confirms partial structural overlap without full sequence alignment. These results show that surface-level similarity alone is insufficient for correct SQL generation when the model lacks task-specific training.
+
+Figure 9 presents the same metrics for the LoRA-fine-tuned model. All scores increase substantially. Exact match accuracy exceeds seventy-six percent, demonstrating that a large majority of predictions are fully identical to the gold SQL. Token-level F1 approaches one, indicating near-perfect token selection. BLEU and ROUGE-L scores also rise sharply, reflecting strong alignment in both local token sequences and overall query structure. Unlike the baseline model, the fine-tuned model consistently produces SQL that matches not only the semantics but also the precise syntactic form of the reference queries.
+
+<div style="
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: stretch;
+  gap: 2em;
+">
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Baseline_Plots/nlp_text_metrics_baseline.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 8: Baseline – Text-based Evaluation Metrics</figcaption>
+  </figure>
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Rank_32_Alpha_16_Plots/nlp_text_metrics.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 9: LoRA – Text-based Evaluation Metrics</figcaption>
+  </figure>
+
+</div>
+
+The contrast between Figures 8 and 9 illustrates the effect of LoRA adaptation clearly. Fine-tuning transforms the model from one that produces loosely SQL-like text into one that reliably generates structured, reference-aligned queries. These improvements demonstrate that LoRA fine-tuning does not merely increase execution success but also enforces strong textual and structural fidelity. This alignment is particularly important for downstream systems that rely on deterministic SQL generation, where even small deviations in syntax or ordering can lead to incorrect results or failures in execution.
+
+### Text to SQL Similarity Evaluation
+
+Figure 6 and Figure 7 present the distributions of Jaccard and normalized Levenshtein similarity between gold SQL queries and model predictions for the baseline and LoRA-fine-tuned models respectively. These metrics capture token overlap and edit distance, providing a view of structural and lexical similarity independent of execution.
+
+For the baseline model in Figure 6, similarity scores are broadly distributed. Jaccard overlap is moderate and Levenshtein similarity varies widely, indicating that while some predicted queries share tokens with the gold SQL, many differ substantially in structure or ordering. This pattern reflects the baseline model’s tendency to produce SQL-like fragments without reliably assembling them into correct or complete queries.
+
+In contrast, Figure 7 shows that similarity scores for the LoRA-fine-tuned model are tightly concentrated near one. Both Jaccard and Levenshtein similarity cluster at high values, indicating that fine-tuning enables the model to consistently generate SQL queries that closely match the gold references at both the token and sequence level. This shift confirms that LoRA adaptation substantially improves structural fidelity in SQL generation.
+
+<div style="
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: stretch;
+  gap: 2em;
+">
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Baseline_Plots/similarity_distributions_baseline.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 6:</figcaption>
+  </figure>
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Rank_32_Alpha_16_Plots/similarity_distributions.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 7:</figcaption>
+  </figure>
+
+</div>
+
+### Text to SQL Similarity and Text Based Metric Correlations
+
+The similarity–correctness plots in Figure 10 and Figure 11 reveal an initially counterintuitive result. While the baseline model shows no correlation between similarity scores and execution correctness for expected reasons, the LoRA-fine-tuned model also fails to exhibit a strong monotonic relationship between textual similarity and correct execution. This outcome is surprising because the fine-tuned model achieves very high BLEU, ROUGE-L, and token-level F1 scores, suggesting near-perfect textual alignment with the gold SQL.
+
+For the baseline model, the lack of correlation is straightforward to explain. Because none of the generated queries execute correctly, similarity metrics vary independently of correctness. Token overlap and edit distance reflect superficial resemblance to SQL syntax but provide no indication of semantic validity. This confirms that similarity-based metrics are not meaningful indicators of correctness when the model has not learned the underlying relational structure of SQL.
+
+<div style="
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: stretch;
+  gap: 2em;
+">
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Baseline_Plots/similarity_vs_correctness_baseline.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0,0,0,0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 10: Baseline – Similarity vs Correctness</figcaption>
+  </figure>
+
+  <figure style="
+    flex: 1 1 350px;
+    max-width: 600px;
+    min-width: 250px;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  ">
+    <img
+      src="./results/Rank_32_Alpha_16_Plots/similarity_vs_correctness.png"
+      style="
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        padding: 12px;
+        background-color: white;
+        box-shadow: 0px 6px 12px rgba(0,0,0,0.25);
+        border-radius: 6px;
+      "
+    >
+    <figcaption>Fig. 11: LoRA – Similarity vs Correctness</figcaption>
+  </figure>
+
+</div>
+
+The LoRA-fine-tuned model, however, presents a more subtle and informative pattern. Although correct executions tend to cluster at high similarity values, a large number of incorrect executions also occur in the same high-similarity region. In other words, even when the predicted SQL is nearly identical to the gold query at the token and sequence level, it may still return an incorrect result. This weak correlation suggests that small semantic errors dominate the remaining failure modes. Minor deviations—such as an incorrect comparison operator, a swapped column in the WHERE clause, or a missing aggregation—can preserve most of the surface form of the query while changing its meaning enough to affect execution.
+
+This behavior highlights a fundamental limitation of text-based similarity metrics for evaluating structured prediction tasks. SQL semantics are brittle: a single-token difference can completely alter query behavior, yet have minimal impact on BLEU, ROUGE, Jaccard, or Levenshtein scores. As a result, high textual similarity does not guarantee semantic equivalence, even for a well-trained model. The LoRA-fine-tuned model has clearly learned the syntax and canonical structure of SQL, but its remaining errors reflect logical misalignment rather than representational noise.
+
+From a modeling perspective, this result suggests that the LoRA adapters have successfully constrained the output space to well-formed SQL, but the training objective does not explicitly penalize semantically incorrect but syntactically plausible queries. The causal language modeling objective optimizes next-token likelihood, not execution behavior. Consequently, the model learns to reproduce the most probable SQL patterns observed during training, even when those patterns encode slightly incorrect logic for a specific question.
+
+### Example Prompt Comparison
+
+The following example illustrates a representative failure mode of the baseline model and highlights how LoRA fine-tuning corrects that behavior by enforcing schema awareness and executable SQL structure. For the prompt *“What’s the title of the episode that Rob Heyland wrote?”*, both models attempt to construct a simple selection query conditioned on the `Writer` column. However, the baseline model produces SQL that does not correctly align with the database schema, while the LoRA-fine-tuned model generates an exact match to the gold query.
+
+The baseline model’s query, `SELECT Title FROM Total WHERE Writer = 'Rob Heyland'`, fails at execution time because it incorrectly treats a column name as a table identifier. Although the table contains a column labeled `Total#`, the actual table name in the SQLite reconstruction is `data`. This error demonstrates a common baseline failure pattern observed throughout the evaluation. The model captures the general intent of the query and selects the appropriate column and condition, but it fails to ground those tokens in the concrete schema representation provided in the prompt. As a result, the query appears SQL-like yet remains non-executable. This behavior aligns with the broader finding that the baseline model often produces high-similarity but semantically invalid SQL.
+
+By contrast, the LoRA-fine-tuned model produces `SELECT "Title" FROM data WHERE "Writer" = 'Rob Heyland'`, which exactly matches the gold SQL query. This output correctly references the table name, quotes column identifiers appropriately, and encodes the correct filtering logic. The successful execution and matching result confirm that fine-tuning enables the model to reliably map natural-language questions to schema-grounded SQL expressions rather than relying on superficial token patterns.
+
+Overall, this example encapsulates the broader effect of LoRA fine-tuning observed across the evaluation. The baseline model demonstrates approximate pattern matching without true schema understanding, while the fine-tuned model consistently produces executable, schema-aligned SQL. The transition from non-executable yet SQL-like outputs to exact, correct queries highlights the value of structured prompt–completion training and parameter-efficient adaptation for text-to-SQL generation tasks.
+
+
+::: {style="font-size: 100%; text-align: center;"}
+```
+EXAMPLE TABLE PREVIEW:
 
 | Total# | Series# | Title                       | Writer            | Director        | Original air date           |
 |--------|---------|-----------------------------|-------------------|-----------------|-----------------------------|
@@ -448,7 +762,7 @@ As we can see from Fig. 7, this plot shows the relationship between similarity m
 | 17     | 4       | " The Angel of Death "      | Julian Unthank    | Matthew Evans   | 27October2007, 7.15–8.00pm  |
 | 18     | 5       | " Ducking and Diving "      | Debbie Oates      | Matthew Evans   | 3November2007, 7.15–8.00pm  |
 
-**Schema Used**
+SCHEMA USED:
 - Total# (TEXT)
 - Series# (TEXT)
 - Title (TEXT)
@@ -456,27 +770,31 @@ As we can see from Fig. 7, this plot shows the relationship between similarity m
 - Director (TEXT)
 - Original air date (TEXT)
 
-**Question:**  
+QUESTION:
 What's the title of the episode that Rob Heyland wrote?
 
-**Gold SQL Query**  
-```sql
-SELECT "Title" FROM data WHERE "Writer" = 'Rob Heyland'
-```
+-------------------------------------------------------------------------------------------------------------------
 
----
-
-**Baseline Model Generated SQL**
-```sql
+BASELINE MODEL GENERATED SQL:
 SELECT Title FROM Total WHERE Writer = 'Rob Heyland'
-```
 
-**Trained Model Generated SQL**
-```sql
+TRAINED MODEL GENERATED SQL:
 SELECT "Title" FROM data WHERE "Writer" = 'Rob Heyland'
-```
 
-**Similarity Metrics**
+GOLD SQL QUERY:
+SELECT "Title" FROM data WHERE "Writer" = 'Rob Heyland'
+
+-------------------------------------------------------------------------------------------------------------------
+
+EXECUTION SUMMARY:
+
+| Item               | Value                       |
+|--------------------|-----------------------------|
+| Baseline Result    | ERROR: no such table: Total |
+| Trained LoRa Result| [('" For England…! "',)]    |
+| Gold Result        | [('" For England…! "',)]    |
+
+SIMILARITY METRICS:
 
 | Metric       | Baseline Value  | Trained LoRa Value|
 |--------------|-----------------|-------------------|
@@ -485,40 +803,51 @@ SELECT "Title" FROM data WHERE "Writer" = 'Rob Heyland'
 | Levenshtein  | 0.873           | 1                 |
 | Token F1     | 0.667           | 1                 |
 
----
+```
+:::
 
-**Execution Summary**
-
-| Item               | Value                       |
-|--------------------|-----------------------------|
-| Baseline Result    | ERROR: no such table: Total |
-| Trained LoRa Result| [('" For England…! "',)]    |
-| Gold Result        | [('" For England…! "',)]    |
-
-As we can see from the above, for the same prompt, "What’s the title of the episode that Rob Heyland wrote?", the baseline model produces SQL that lacks matches. Such as incorrectly querying a non-existent table named Total instead of the data, which leads to an execution failure and fails to correctly align with the database schema. Where the trained LoRA Model is able to output an exact SQL query that matches the gold SQL query. Moreover, for Similarity Metrics, the baseline model shows partial token and structural overlap, while the trained LoRA model has perfect similarity scores. Additionally, in terms of execution, the baseline query fails to run, whereas the LoRA-generated query executes successfully and returns the correct result.
-
-Overall compare with the baseline model, the trained LoRA model shows a strong improvements in SQL correctness, execution success, and semantic similarity.
+<figcaption style="text-align: center; font-style: italic; margin-top: 0.5em;">
+Example 3. Output comparison for prompt, baseline SQL, trained SQL, and gold SQL — illustrating the progression from model output to execution and similarity evaluation; demonstrates the benefit of structured prompt–completion training and schema alignment in improving SQL generation and execution accuracy.
+</figcaption>
 
 ## Discussion
 
+### Achievements
+
+The primary outcome of this experiment is that LoRA-based supervised fine-tuning fundamentally alters how Gemma 3 4B approaches the text-to-SQL task. In its baseline form, the model frequently produces outputs that resemble SQL syntactically but fail to execute due to schema grounding errors or subtle structural mistakes. After fine-tuning, the same model consistently generates well-formed, schema-aligned queries and achieves correct execution on a substantial portion of the evaluation set. This shift demonstrates that lightweight, parameter-efficient adaptation is sufficient to transform a general-purpose language model into a functional text-to-SQL system within the scope of the WikiSQL task.
+
+The improvements observed across execution accuracy and text-based similarity metrics reinforce this conclusion. Exact match, BLEU, ROUGE-L, and token-level F1 all increase dramatically after fine-tuning, indicating that the adapted model learns not only to produce executable SQL but also to closely match the canonical structure and wording of reference queries. Importantly, these gains are achieved without modifying the frozen backbone, highlighting the efficiency of the LoRA approach and validating the design choice to focus adaptation capacity on attention and feed-forward projections.
+
+Equally important is the evaluation pipeline itself. By holding prompts, decoding logic, SQL extraction, and execution environments constant across models, the experiment isolates model behavior as the primary driver of performance differences. The resulting row-level logs and error categorizations provide a clear window into how and why predictions succeed or fail, enabling meaningful interpretation beyond aggregate scores.
+
+### Findings and Interpretation
+
+A key finding is that text-based similarity metrics, while useful, do not fully explain execution behavior. For the baseline model, moderate similarity scores coexist with universal execution failure, confirming that surface resemblance to SQL does not imply semantic correctness. For the LoRA-fine-tuned model, similarity scores are uniformly high, yet execution correctness still varies. This is initially surprising, but it reflects the brittle nature of SQL semantics. Small deviations in operators, column selection, or conditions can preserve most of the query text while changing the result entirely. As a consequence, similarity metrics saturate before execution accuracy does.
+
+This pattern suggests that LoRA fine-tuning is especially effective at teaching canonical SQL form and schema-aware syntax, but less directly optimized for resolving fine-grained semantic decisions. The training objective rewards reproducing the gold query string rather than verifying that the query computes the correct denotation. As a result, the remaining errors tend to be subtle and logical rather than structural, indicating that the model has moved beyond basic formatting failures into a regime where errors are harder to detect using text-based metrics alone.
+
 ### Limitations
 
-**Restricted SQL complexity:** Training on WikiSQL limits the model to simple, single-table queries. It does not learn joins, grouping, nested logic, or multi-table reasoning needed for many real production systems.
+The scope of the conclusions is constrained by the characteristics of the WikiSQL dataset. Queries are limited to single tables and relatively simple compositions, which means the results do not establish robustness to joins, nested queries, or more complex relational reasoning. In addition, schemas are provided as serialized text rather than structured objects, encouraging the model to learn correlations between language patterns and column names instead of deeper relational representations.
 
-**Shallow Schema Understanding:** he model only sees column headers without richer schema context (types, constraints, relationships), reducing its ability to generalize to new databases or ambiguous column naming.
-
-**LoRA SFT Improves Syntax More Than Reasoning:** Fine Tuning mainly teaches formatting and column/operator patterns. It does not significantly enhance Multi Step reasoning, leading to remaining execution and logical failures.
+The reliance on string-level supervision also introduces limitations. Because training optimizes next-token prediction against a single reference query, the model is not explicitly penalized for producing semantically incorrect but syntactically plausible SQL. This explains why high similarity does not always imply correct execution, even after fine-tuning. Finally, practical constraints require evaluating only a subset of the test set, which introduces variance and may underrepresent rare but important failure modes.
 
 ### Future Work
-We aim to includes adapting more complicated SQL data structures to the training pipeline, coordinating supervised fine tuning with other training methods like Reinforcement Learning, and integrating trained models into real world databases and web applications.
+
+The results point to several directions for improvement. The most direct extension is to incorporate execution-aware signals into training or inference, allowing the model to receive feedback based on query results rather than surface form alone. More structured schema representations and constrained decoding could further reduce grounding errors by limiting the space of valid outputs. Additional analysis that stratifies errors by query type or semantic operation would help isolate the decisions the model still struggles to make.
+
+Taken together, these findings suggest that LoRA fine-tuning is a powerful first step for text-to-SQL adaptation, effectively teaching syntax and schema alignment at low computational cost. Addressing the remaining errors will likely require objectives and constraints that operate at the semantic level rather than relying solely on textual similarity.
+
+## Conclusion
+
+This project demonstrates that parameter efficient fine tuning with LoRA can effectively adapt a general purpose language model to the text to SQL task while maintaining a modest computational footprint. Using Gemma 3 4B as a baseline, the experiments show that supervised fine tuning on WikiSQL transforms the model from one that produces largely non executable queries into a system capable of generating schema aligned and frequently correct SQL. Execution based evaluation reveals substantial gains that are not fully captured by text similarity metrics alone, highlighting the importance of end to end evaluation with a real SQL engine. At the same time, the analysis exposes clear limitations in semantic robustness, where high textual similarity does not always guarantee correct execution. Overall, the results suggest that LoRA fine tuning provides a strong foundation for practical text to SQL systems, and that future improvements will depend on integrating execution aware objectives and richer schema reasoning rather than increasing model size or training cost.
 
 ## References
-
-**NEED TO DISCUSS**
 
 * Dettmers et al. (2023) “QLoRA: Efficient Finetuning of Quantized LLMs”
 * Hu et al. (2021) “LoRA: Low-Rank Adaptation of Large Language Models”
 * Larson (2025) “Lectures 7: Sequence Models and Attention Mechanisms” (DSAN 5800)
 * Larson (2025) “Lecture 8: Transformers” (DSAN 5800)
+* Google (2024) “Fine-tuning Gemma Models with QLoRA using Hugging Face.” Gemma Documentation. https://ai.google.dev/gemma/docs/core/huggingface_text_finetune_qlora
 * OpenAI (2025) ChatGPT (GPT-5.2) — used for summarization and language refinement
 
