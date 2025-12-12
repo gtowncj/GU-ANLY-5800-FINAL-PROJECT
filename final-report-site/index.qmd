@@ -436,8 +436,6 @@ As we can see from Fig. 9, this plot shows the distributions of Jaccard and norm
 
 As we can see from Fig. 7, this plot shows the relationship between similarity metrics and SQL execution correctness for the trained LoRA Model. We can see from the points indicating incorrect executions that correct SQL queries start to appear, clustered around high Jaccard and Levenshtein values. This means these queries have strong token overlap and a similar structure to the gold SQL. Also, the number of incorrect SQL queries decreased significantly. Compared with the baseline model, the trained LoRA model shows a clear relationship between similarity scores and SQL execution correctness.
 
-Overall compare with the baseline model, the trained LoRA model shows a strong improvements in SQL correctness, execution success, and semantic similarity.
-
 #### Example Prompt Comparison
 
 **Table Preview (first rows)**
@@ -497,9 +495,18 @@ SELECT "Title" FROM data WHERE "Writer" = 'Rob Heyland'
 | Trained LoRa Result| [('" For England…! "',)]    |
 | Gold Result        | [('" For England…! "',)]    |
 
+As we can see from the above, for the same prompt, "What’s the title of the episode that Rob Heyland wrote?", the baseline model produces SQL that lacks matches. Such as incorrectly querying a non-existent table named Total instead of the data, which leads to an execution failure and fails to correctly align with the database schema. Where the trained LoRA Model is able to output an exact SQL query that matches the gold SQL query. Moreover, for Similarity Metrics, the baseline model shows partial token and structural overlap, while the trained LoRA model has perfect similarity scores. Additionally, in terms of execution, the baseline query fails to run, whereas the LoRA-generated query executes successfully and returns the correct result.
+
+Overall compare with the baseline model, the trained LoRA model shows a strong improvements in SQL correctness, execution success, and semantic similarity.
+
 ## Discussion
+
 
 ## References
 
-
+* Dettmers et al. (2023) “QLoRA: Efficient Finetuning of Quantized LLMs”
+* Hu et al. (2021) “LoRA: Low-Rank Adaptation of Large Language Models”
+* Larson (2025) “Lectures 7: Sequence Models and Attention Mechanisms” (DSAN 5800)
+* Larson (2025) “Lecture 8: Transformers” (DSAN 5800)
+* OpenAI (2025) ChatGPT (GPT-5.2) — used for summarization and language refinement
 
