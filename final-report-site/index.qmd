@@ -333,19 +333,25 @@ The final evaluation step involves computing summary statistics over all predict
   <figcaption>Fig. 1:</figcaption>
 </figure>
 
+As we can see from Fig. 1, this plot measures the mean token-level accuracy during training for the LoRA-fine-tuned Gemma model. In the early training steps, the token accuracy increases rapidly and stabilizes near **ENTER IF THERE IS A VALUE**, which means that the model can converge quickly and effectively adapt to SQL generation. Also, we can see there are occasional sharp drops from time to time. Which likely correspond to more challenging training batches, but accuracy recovers quickly, indicating that the optimization process remains stable throughout training. Since this metric is calculated from training data, it primarily reflects learning dynamics rather than generalization performance.
+
 <figure style="text-align: center;">
   <img src="./results/Rank_32_Alpha_16_Plots/training_grad_norm.png"
        width="60%"
        style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 1:</figcaption>
+  <figcaption>Fig. 2:</figcaption>
 </figure>
+
+As we can see from Fig. 2, this plot shows the gradient norm over training steps for the LoRA-fine-tuned Gemma model. In the early training steps, the gradient norm is high and fluctuates significantly, indicating that the parameters are updated frequently during the model learning process. Over time, the gradient norm decreases and stabilizes, indicating that the model is converging. Also, occasional spikes appear due to more challenging training batches. However, training remains stable and does not suffer from gradient explosion.
 
 <figure style="text-align: center;">
   <img src="./results/Rank_32_Alpha_16_Plots/training_loss.png"
        width="60%"
        style="padding: 12px; background-color: white; box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.25); border-radius: 6px;">
-  <figcaption>Fig. 1:</figcaption>
+  <figcaption>Fig. 3:</figcaption>
 </figure>
+
+As we can see from Fig. 3, this plot measures the training loss over training steps for the LoRA-fine-tuned Gemma model. In the early training steps, the training loss decreases sharply, which means the model learns and adapts quickly from data. As the training continues, the decrease in training loss starts to drop slowly and stabilizes at a low value, indicating convergence. Also, from the loss curve, we can see there is a consistent downward trend despite noise in the raw loss, which means the training is stable and effective.
 
 ### Text to SQL Evaluation Results
 
