@@ -333,7 +333,7 @@ The final evaluation step involves computing summary statistics over all predict
   <figcaption>Fig. 1:</figcaption>
 </figure>
 
-As we can see from Fig. 1, this plot measures the mean token-level accuracy during training for the LoRA-fine-tuned Gemma model. In the early training steps, the token accuracy increases rapidly and stabilizes near **ENTER IF THERE IS A VALUE**, which means that the model can converge quickly and effectively adapt to SQL generation. Also, we can see there are occasional sharp drops from time to time. Which likely correspond to more challenging training batches, but accuracy recovers quickly, indicating that the optimization process remains stable throughout training. Since this metric is calculated from training data, it primarily reflects learning dynamics rather than generalization performance.
+As we can see from Fig. 1, this plot measures the mean token-level accuracy during training for the LoRA-fine-tuned Gemma model. In the early training steps, the token accuracy increases rapidly and stabilizes near the end, which means that the model can converge quickly and effectively adapt to SQL generation. Also, we can see there are occasional sharp drops from time to time. Which likely correspond to more challenging training batches, but accuracy recovers quickly, indicating that the optimization process remains stable throughout training. Since this metric is calculated from training data, it primarily reflects learning dynamics rather than generalization performance.
 
 <figure style="text-align: center;">
   <img src="./results/Rank_32_Alpha_16_Plots/training_grad_norm.png"
@@ -501,8 +501,20 @@ Overall compare with the baseline model, the trained LoRA model shows a strong i
 
 ## Discussion
 
+### Limitations
+
+**Restricted SQL complexity:** Training on WikiSQL limits the model to simple, single-table queries. It does not learn joins, grouping, nested logic, or multi-table reasoning needed for many real production systems.
+
+**Shallow Schema Understanding:** he model only sees column headers without richer schema context (types, constraints, relationships), reducing its ability to generalize to new databases or ambiguous column naming.
+
+**LoRA SFT Improves Syntax More Than Reasoning:** Fine Tuning mainly teaches formatting and column/operator patterns. It does not significantly enhance Multi Step reasoning, leading to remaining execution and logical failures.
+
+### Future Work
+We aim to includes adapting more complicated SQL data structures to the training pipeline, coordinating supervised fine tuning with other training methods like Reinforcement Learning, and integrating trained models into real world databases and web applications.
 
 ## References
+
+**NEED TO DISCUSS**
 
 * Dettmers et al. (2023) “QLoRA: Efficient Finetuning of Quantized LLMs”
 * Hu et al. (2021) “LoRA: Low-Rank Adaptation of Large Language Models”
