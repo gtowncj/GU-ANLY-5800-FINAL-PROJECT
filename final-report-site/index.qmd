@@ -357,7 +357,7 @@ As we can see from Fig. 3, this plot measures the training loss over training st
 
 #### Baseline
 
-We evaluate the performance of the baseline Gemma model without LoRA fine-tuning, which serves as a reference for comparison with the [Trained LoRA Model](#trained-lora-model-(rank-32-alpha-16) in the following section.
+We evaluate the performance of the baseline Gemma model without LoRA fine-tuning, which serves as a reference for comparison with the [Trained LoRA Model](#trained-lora-model-(rank-32-alpha-16)) in the following section.
 
 <figure style="text-align: center;">
   <img src="./results/Baseline_Plots/error_breakdown_baseline.png"
