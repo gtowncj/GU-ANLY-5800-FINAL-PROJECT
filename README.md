@@ -2,6 +2,7 @@
 
 **Authors:** 
 CJ Jones | Georgetown University | ANLY-5800 | Fall '25*
+
 Tianyu Zhao | Georgetown University | ANLY-5800 | Fall '25*
 
 ---
