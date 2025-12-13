@@ -401,7 +401,9 @@ Figure 2 shows the gradient norm over training steps. Early training is characte
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 1:</figcaption>
+    <figcaption>
+      Fig. 1: Mean token-level accuracy during LoRA fine-tuning, showing rapid convergence and stable training.
+    </figcaption>
   </figure>
 
   <figure style="
@@ -425,7 +427,9 @@ Figure 2 shows the gradient norm over training steps. Early training is characte
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 2:</figcaption>
+    <figcaption>
+      Fig. 2: Gradient norm during LoRA fine-tuning, illustrating convergence and stable parameter updates.
+    </figcaption>
   </figure>
 
 </div>
@@ -461,7 +465,9 @@ Finally, and most importantly for the training cycle, Figure 3 displays the trai
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 3:</figcaption>
+    <figcaption>
+      Fig. 3: Training loss over epochs, showing rapid initial decline and continued improvement as fine-tuning progresses.
+    </figcaption>
   </figure>
 </div>
 
@@ -502,7 +508,9 @@ Figure 5 shows the breakdown of execution errors for the LoRA-fine-tuned Gemma m
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 4:</figcaption>
+    <figcaption>
+      Fig. 4: Error breakdown for baseline Gemma model predictions. All generated queries fail to execute, with errors stemming from syntax and schema issues.
+    </figcaption>
   </figure>
 
   <figure style="
@@ -526,7 +534,9 @@ Figure 5 shows the breakdown of execution errors for the LoRA-fine-tuned Gemma m
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 5:</figcaption>
+    <figcaption>
+      Fig. 5: Error breakdown for LoRA-fine-tuned Gemma model predictions. More than half of queries now execute correctly, with most remaining errors due to semantic mismatches rather than syntax or runtime issues.
+    </figcaption>
   </figure>
 
 </div>
@@ -572,7 +582,7 @@ Figure 9 presents the same metrics for the LoRA-fine-tuned model. All scores inc
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 8: Baseline – Text-based Evaluation Metrics</figcaption>
+    <figcaption>Fig. 6: Baseline – Text-based Evaluation Metrics</figcaption>
   </figure>
 
   <figure style="
@@ -596,7 +606,7 @@ Figure 9 presents the same metrics for the LoRA-fine-tuned model. All scores inc
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 9: LoRA – Text-based Evaluation Metrics</figcaption>
+    <figcaption>Fig. 7: LoRA – Text-based Evaluation Metrics</figcaption>
   </figure>
 
 </div>
@@ -640,7 +650,9 @@ In contrast, Figure 7 shows that the LoRA-fine-tuned model's similarity scores a
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 6:</figcaption>
+    <figcaption>
+      Fig. 8: Baseline model – Jaccard and Levenshtein similarity distributions between predicted and gold SQL. Score distributions are broad, indicating low and variable structural fidelity.
+    </figcaption>
   </figure>
 
   <figure style="
@@ -664,7 +676,9 @@ In contrast, Figure 7 shows that the LoRA-fine-tuned model's similarity scores a
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 7:</figcaption>
+    <figcaption>
+      Fig. 9: LoRA-fine-tuned model – Jaccard and Levenshtein similarity distributions between predicted and gold SQL. Scores are tightly clustered at high values, showing consistent structural similarity after fine-tuning.
+    </figcaption>
   </figure>
 
 </div>
@@ -704,7 +718,9 @@ For the baseline model, the lack of correlation is straightforward to explain. B
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 10: Baseline – Similarity vs Correctness</figcaption>
+    <figcaption>
+      Fig. 10: Baseline – Similarity vs Correctness.
+    </figcaption>
   </figure>
 
   <figure style="
@@ -728,7 +744,9 @@ For the baseline model, the lack of correlation is straightforward to explain. B
         border-radius: 6px;
       "
     >
-    <figcaption>Fig. 11: LoRA – Similarity vs Correctness</figcaption>
+    <figcaption>
+      Fig. 11: LoRA – Similarity vs Correctness.<br>
+    </figcaption>
   </figure>
 
 </div>
